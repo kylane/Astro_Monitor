@@ -16,8 +16,8 @@
 // Decimal degrees. Negative = South / West.
 // Find yours at: https://www.latlong.net
 // ---------------------------------------------------------------------------
-#define HOME_LAT   -27.65973    // e.g. -27.65973 for Augustine Heights, QLD
-#define HOME_LON   152.88028    // e.g. 152.88028 for Augustine Heights, QLD
+#define HOME_LAT   -27.47779    // Get your location from https://www.latlong.net
+#define HOME_LON   53.029840
 
 // ---------------------------------------------------------------------------
 // Timezone (POSIX format)
