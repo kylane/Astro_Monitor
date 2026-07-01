@@ -2,7 +2,7 @@
 
 A standalone ESP8266 device that fetches real-time astronomy weather forecasts and displays them on a 1.3" OLED screen. At a glance it tells you whether tonight is worth setting up your telescope.
 
-![Astro Monitor]
+![Astro Monitor](images/IMG1.jpg)
 
 ---
 
