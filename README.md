@@ -124,17 +124,17 @@ FEW CLOUDS
 
 ```
 CLOUDS 2/5                 21:04:33
- ┌──┐┌──┐┌──┐┌──┐┌──┐┌──┐ │CLR
+ ┌──┐┌──┐┌──┐┌──┐┌──┐┌──┐ │OVC
  │  ││▓▓││▓▓││▓▓││  ││  │ │
  │  ││▓▓││▓▓││▓▓││  ││  │ │
- └──┘└──┘└──┘└──┘└──┘└──┘ │OVC
+ └──┘└──┘└──┘└──┘└──┘└──┘ │CLR
  20h 23h 02h 05h 08h 11h
  5/9 9/9 9/9 9/9 2/9 1/9
 ```
 
 - **Taller bar = more cloud cover** (bad for astronomy)
 - **Shorter bar = less cloud** (good for astronomy)
-- The **CLR/OVC** labels on the right mark the top (clear) and bottom (overcast) of the scale
+- The **CLR/OVC** labels on the right mark the top (overcast) and bottom (clear) of the scale
 - Each bar label shows the **hour** and **cloud cover rating out of 9**
 
 Cloud cover scale:

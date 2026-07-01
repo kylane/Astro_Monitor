@@ -381,8 +381,8 @@ void screenClouds() {
   // Y-axis: 1px gap after last bar, 1px gap before labels
   u8g2.setFont(u8g2_font_4x6_tr);
   u8g2.drawVLine(axisX, barY - barMaxH, barMaxH);              // CLOUDS: Y-axis line
-  u8g2.drawStr(axisX + 2, barY - barMaxH + 5, "CLR"); // CLOUDS: top label, 1px gap from line
-  u8g2.drawStr(axisX + 2, barY,               "OVC"); // CLOUDS: bottom label, 1px gap from line
+  u8g2.drawStr(axisX + 2, barY - barMaxH + 5, "OVC"); // CLOUDS: top label, 1px gap from line
+  u8g2.drawStr(axisX + 2, barY,               "CLR"); // CLOUDS: bottom label, 1px gap from line
 }
 
 // ---------------------------------------------------------------------------
