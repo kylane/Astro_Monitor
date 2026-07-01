@@ -8,10 +8,10 @@ A standalone ESP8266 device that fetches real-time astronomy weather forecasts a
 
 ## Hardware
 
-| Component | Details |
-|-----------|---------|
-| Microcontroller | ESP8266 (FREENOVE ESP8266 / NodeMCU ESP-12E or similar) |
-| Display | 1.3" SH1106 I2C OLED, 128×64 pixels |
+| Component | Details | Amazon |
+|-----------|---------|--------|
+| Microcontroller | ESP8266 (FREENOVE ESP8266 / NodeMCU ESP-12E or similar) | https://www.amazon.com.au/dp/B0B6G3KXSK |
+| Display | 1.3" SH1106 I2C OLED, 128×64 pixels | https://www.amazon.com.au/dp/B0DX2NXK49 |
 
 ### Wiring
 
