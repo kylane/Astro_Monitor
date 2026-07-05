@@ -71,9 +71,13 @@ The device configures itself over WiFi — no code editing or re-flashing needed
 
 **First boot:** the OLED will show "SETUP MODE". From your phone or laptop, join the WiFi network **`AstroMonitor-Setup`**, and a setup page should open automatically (if not, browse to `192.168.4.1`). Pick your home WiFi network and enter its password, plus your latitude, longitude and POSIX timezone string, then save. The device reboots and connects.
 
-**To change settings later** (new WiFi network, moved house, etc.): hold the board's **FLASH button** (the one wired to GPIO0) while powering on or pressing RST, and keep holding it for a couple of seconds until "SETUP MODE" appears on screen. Then reconnect to `AstroMonitor-Setup` as above.
+**To change settings later** (new WiFi network, moved house, etc.): while the device is running normally (showing the rotating screens), press the board's **FLASH button** (the unlabelled one next to the USB port, wired to GPIO0 — not the RST button). The OLED will prompt you:
+- **Release it right away** to just open the setup portal, pre-filled with your current WiFi/location/timezone as editable defaults — nothing is erased until you save. Once saved, the device restarts on its own to apply the new settings.
+- **Keep holding it for 5+ seconds** to trigger a **factory reset** — this wipes the saved WiFi credentials and location/timezone completely, then restarts into a blank setup portal. Use this when handing the device to someone else or moving it to a new home network from scratch.
 
-Settings are stored on the device (LittleFS for location/timezone, the ESP8266's own WiFi flash storage for network credentials) and survive power loss and re-uploading the sketch.
+Note: this button only works when pressed *after* the device has already booted — don't hold it down while plugging in power or pressing RST, since the ESP8266 checks that pin at the hardware level during an actual power-on/reset and will drop into a serial flashing mode instead of running normally (the display stays blank) if it's held low at that exact moment.
+
+Settings are stored on the device (LittleFS for location/timezone, the ESP8266's own WiFi flash storage for network credentials) and survive power loss and re-uploading the sketch — until a factory reset explicitly clears them.
 
 After connecting, the device automatically looks up a human-readable place name for your coordinates (e.g. "Brisbane") and shows it on the TONITE screen for confirmation that the location is right. If the lookup fails (or hasn't run yet), it falls back to showing "Location Unknown" — this doesn't affect forecasts, which are driven entirely by lat/lon.
 
@@ -115,9 +119,9 @@ FEW CLOUDS
 |---------|-------|---------|
 | PERFECT | 85–100 | Exceptional night, ideal for imaging |
 | GOOD ENOUGH | 65–84 | Good conditions, worth setting up |
-| OK | 45–64 | Marginal but usable |
+| MARGINAL | 45–64 | Marginal but usable |
 | DOUBTFUL | 25–44 | Poor conditions, probably not worth it |
-| NO GO | 0–24 | Bad conditions, stay inside |
+| TERRIBLE | 0–24 | Bad conditions, stay inside |
 
 **Score calculation** — weighted average of four factors:
 
@@ -265,6 +269,7 @@ All timing and location settings are in `config.h`:
 - The service occasionally returns malformed JSON — the built-in retry logic handles this automatically
 - Data covers 72 hours ahead in 3-hour slots
 - This project uses HTTP**S** to connect to 7timer with certificate verification disabled (acceptable for a public weather API with no sensitive data)
+- If no forecast data has been fetched successfully yet, the device shows "Refreshing data" and retries every 10 seconds for the first 10 attempts, then backs off to retrying every 60 seconds with a "Retrying... try a power cycle if this persists" message. This is normal recovery behaviour after a fresh boot and usually resolves within a minute or two on its own.
 
 ---
 

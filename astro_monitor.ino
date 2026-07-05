@@ -21,8 +21,10 @@
 //   portal AP called "AstroMonitor-Setup". Connect to it and a captive
 //   portal page lets you pick your WiFi network and enter latitude,
 //   longitude and POSIX timezone.
-//   To reopen the portal later (e.g. to change location or WiFi), hold
-//   the board's FLASH button (GPIO0) while powering on / resetting.
+//   To reopen the portal later (e.g. to change location or WiFi), press
+//   the board's FLASH button (GPIO0) at any time while it's running —
+//   release quickly to just open the portal, or hold 5+ seconds for a
+//   full factory reset (wipes WiFi + location/timezone, then restarts).
 // =============================================================================
 
 #include <Arduino.h>
@@ -72,6 +74,7 @@ AstroSlot slots[MAX_SLOTS];
 uint8_t   slotCount = 0;
 bool      dataValid = false;
 uint32_t  lastFetch = 0;
+uint16_t  fetchAttempts = 0;    // consecutive attempts since the last success
 char      initTime[12] = "";    // e.g. "2026062918"
 
 // Screen rotation
@@ -230,7 +233,10 @@ int bestNightSlot() {
 bool fetchAstro() {
   WiFiClientSecure client;
   client.setInsecure();   // skip certificate validation — fine for public weather API
+  client.setTimeout(8000);  // bound the TCP/TLS socket itself — see fetchLocationName() note
   HTTPClient http;
+  http.setTimeout(8000);   // bound the HTTP-layer read too, so a stalled request always
+                           // returns (and gets retried) instead of hanging forever
 
   char url[160];
   snprintf(url, sizeof(url),
@@ -300,6 +306,17 @@ bool fetchAstro() {
   return false;
 }
 
+// Wraps fetchAstro() with the attempt counter that drives retry cadence and
+// on-screen messaging (see drawNoDataMessage() and the loop() refresh logic).
+void doFetchAstro() {
+  if (fetchAstro()) {
+    fetchAttempts = 0;
+  } else {
+    fetchAttempts++;
+  }
+  lastFetch = millis();
+}
+
 // ---------------------------------------------------------------------------
 // Resolve a human place name from lat/lon via BigDataCloud's free reverse
 // geocoding endpoint (no API key required, no signup). Only called once per
@@ -308,7 +325,12 @@ bool fetchAstro() {
 bool fetchLocationName(float lat, float lon) {
   WiFiClientSecure client;
   client.setInsecure();   // skip certificate validation — fine for a public geocoding API
+  client.setTimeout(8000);  // bound the TCP/TLS socket — without this, a stalled
+                            // connection can block setup() forever, freezing the
+                            // whole device (screen rotation, everything) since
+                            // nothing after this call ever gets to run
   HTTPClient http;
+  http.setTimeout(8000);   // bound the HTTP-layer read too
 
   char url[192];
   snprintf(url, sizeof(url),
@@ -381,20 +403,39 @@ void drawBar(int x, int y, int w, int h, int val, int maxVal) {
   if (fill > 0) u8g2.drawBox(x + 1, y + 1, fill, h - 2);
 }
 
+// Shown on any screen while dataValid is false. Message depends on how many
+// fetch attempts have happened since the last success: a brief note while
+// still in the fast-retry window (every 10s, up to 10 tries), then longer
+// guidance once that's expired and retries have backed off to every 60s.
+void drawNoDataMessage() {
+  if (fetchAttempts < 10) {
+    u8g2.setFont(u8g2_font_6x12_tr);
+    u8g2.drawStr(4, 36, "Refreshing data");
+  } else {
+    u8g2.setFont(u8g2_font_5x7_tr);
+    const char* l1 = "Retrying...";
+    const char* l2 = "Try a power cycle";
+    const char* l3 = "if this persists";
+    u8g2.drawStr((128 - u8g2.getStrWidth(l1)) / 2, 28, l1);
+    u8g2.drawStr((128 - u8g2.getStrWidth(l2)) / 2, 40, l2);
+    u8g2.drawStr((128 - u8g2.getStrWidth(l3)) / 2, 50, l3);
+  }
+}
+
 // Score → GO / MARGINAL / NO GO label
 const char* goNoGo(int score) {
   if (score >= 85) return "PERFECT";
   if (score >= 65) return "GOOD ENOUGH";
-  if (score >= 45) return "OK";
+  if (score >= 45) return "MARGINAL";
   if (score >= 25) return "DOUBTFUL";
-  return "NO GO";
+  return "TERRIBLE";
 }
 
 const char* goNoGoSub(int score) {
   if (score >= 85) return "Conditions are perfect";
   if (score >= 65) return "Conditions are good";
-  if (score >= 45) return "Conditions are ok";
-  if (score >= 25) return "Conditions aren't good";
+  if (score >= 45) return "Conditions are ok at best";
+  if (score >= 25) return "Conditions are not great";
   return "Conditions are terrible";
 }
 
@@ -410,8 +451,7 @@ void screenTonite() {
   u8g2.drawStr((128 - lw) / 2, 15, locationName); // TONITE: resolved place name, Y=15
 
   if (!dataValid) {
-    u8g2.setFont(u8g2_font_6x12_tr);
-    u8g2.drawStr(4, 36, "FETCHING...");  // TONITE: loading message, Y=36
+    drawNoDataMessage();
     return;
   }
 
@@ -468,8 +508,7 @@ void screenClouds() {
   drawHeader("CLOUDS");
 
   if (!dataValid || slotCount == 0) {
-    u8g2.setFont(u8g2_font_6x12_tr);
-    u8g2.drawStr(4, 36, "NO DATA");     // CLOUDS: no-data message, Y=36
+    drawNoDataMessage();
     return;
   }
 
@@ -516,8 +555,7 @@ void screenSeeing() {
   drawHeader("SEE RATING");
 
   if (!dataValid || slotCount == 0) {
-    u8g2.setFont(u8g2_font_6x12_tr);
-    u8g2.drawStr(4, 36, "NO DATA");     // SEEING: no-data message, Y=36
+    drawNoDataMessage();
     return;
   }
 
@@ -571,8 +609,7 @@ void screenConditions() {
   drawHeader("CONDTNS");
 
   if (!dataValid || slotCount == 0) {
-    u8g2.setFont(u8g2_font_6x12_tr);
-    u8g2.drawStr(4, 36, "NO DATA");     // CONDTNS: no-data message, Y=36
+    drawNoDataMessage();
     return;
   }
 
@@ -606,8 +643,7 @@ void screenForecast() {
   drawHeader("FORECAST");
 
   if (!dataValid || slotCount == 0) {
-    u8g2.setFont(u8g2_font_6x12_tr);
-    u8g2.drawStr(4, 36, "NO DATA");    // FORECAST: no-data message, Y=36
+    drawNoDataMessage();
     return;
   }
 
@@ -652,26 +688,23 @@ void screenForecast() {
 }
 
 // ---------------------------------------------------------------------------
-// Setup
+// WiFi/location setup portal. Runs at boot (forcePortal=false: only opens if
+// there's no saved WiFi or it can't connect) or on demand from loop() when
+// the FLASH button is pressed (forcePortal=true: always opens).
+//
+// GPIO0 must NOT be held low across an actual power-on/reset — the ESP8266's
+// boot ROM samples it at that exact moment and, if low, enters the UART
+// flash/download bootloader instead of running this sketch at all (which is
+// why the display used to stay completely blank when holding the button
+// while powering up). So the button is only ever read here, well after
+// boot has already completed normally, via loop()'s continuous polling.
+//
+// If the user saves new settings, we show a confirmation and reboot the
+// device ourselves (ESP.restart()) rather than asking them to power cycle —
+// this guarantees NTP/timezone/geocode/forecast all re-initialize cleanly
+// with the new values, and this function never returns in that case.
 // ---------------------------------------------------------------------------
-void setup() {
-  Serial.begin(115200);
-  Serial.println("\n[ASTRO] Booting...");
-
-  u8g2.begin();
-  u8g2.clearBuffer();
-  u8g2.setFont(u8g2_font_6x12_tr);
-  u8g2.drawStr(4, 20, "ASTRO MONITOR");
-  u8g2.drawStr(4, 36, "Connecting WiFi");
-  u8g2.sendBuffer();
-
-  loadSettings();
-
-  // Hold the FLASH button (GPIO0) while powering on / resetting to force
-  // the setup portal open, even if WiFi is already configured.
-  pinMode(0, INPUT_PULLUP);
-  bool forcePortal = (digitalRead(0) == LOW);
-
+bool runWifiSetup(bool forcePortal) {
   char latStr[16], lonStr[16];
   snprintf(latStr, sizeof(latStr), "%.5f", homeLat);
   snprintf(lonStr, sizeof(lonStr), "%.5f", homeLon);
@@ -722,7 +755,52 @@ void setup() {
     // Location changed — old resolved name no longer applies until re-geocoded
     strncpy(locationName, "Location Unknown", sizeof(locationName) - 1);
     locationName[sizeof(locationName) - 1] = '\0';
+    saveSettings(homeLat, homeLon, tzString, locationName);
+
+    u8g2.clearBuffer();
+    u8g2.setFont(u8g2_font_6x12_tr);
+    u8g2.drawStr(4, 24, "SETTINGS SAVED");
+    u8g2.setFont(u8g2_font_5x7_tr);
+    u8g2.drawStr(4, 40, "Restarting to apply");
+    u8g2.drawStr(4, 50, "new settings...");
+    u8g2.sendBuffer();
+    Serial.println("[CFG] Settings saved — restarting");
+    delay(2500);
+    ESP.restart();
+    // never reached
   }
+
+  if (!connected) {
+    // Whatever WiFi state we had before is likely disrupted by the portal's
+    // AP+STA mode; drop back to plain STA so the caller's own connectivity
+    // checks behave predictably.
+    WiFi.mode(WIFI_STA);
+  }
+
+  return connected;
+}
+
+// ---------------------------------------------------------------------------
+// Setup
+// ---------------------------------------------------------------------------
+void setup() {
+  Serial.begin(115200);
+  Serial.println("\n[ASTRO] Booting...");
+
+  u8g2.begin();
+  u8g2.clearBuffer();
+  u8g2.setFont(u8g2_font_6x12_tr);
+  u8g2.drawStr(4, 20, "ASTRO MONITOR");
+  u8g2.drawStr(4, 36, "Connecting WiFi");
+  u8g2.sendBuffer();
+
+  loadSettings();
+
+  // FLASH button (GPIO0) is only ever polled from loop() — see the note on
+  // runWifiSetup() for why it must not be read/held during boot itself.
+  pinMode(0, INPUT_PULLUP);
+
+  bool connected = runWifiSetup(false);
 
   if (!connected) {
     u8g2.clearBuffer();
@@ -744,21 +822,6 @@ void setup() {
   WiFi.mode(WIFI_STA);
   delay(1500);
 
-  // Resolve a human-readable place name once per location change (or once
-  // on first boot if it's never been resolved) — cached in settings.json
-  // afterwards so this isn't called on every boot.
-  bool needGeoLookup = settingsSaved || strcmp(locationName, "Location Unknown") == 0;
-  if (needGeoLookup) {
-    Serial.println("[GEO] Resolving location name...");
-    if (!fetchLocationName(homeLat, homeLon)) {
-      Serial.println("[GEO] Lookup failed, using \"Location Unknown\"");
-    }
-  }
-
-  if (settingsSaved || needGeoLookup) {
-    saveSettings(homeLat, homeLon, tzString, locationName);
-  }
-
   // Sync time
   configTime(0, 0, "pool.ntp.org", "time.google.com");
   setenv("TZ", tzString, 1);
@@ -776,25 +839,93 @@ void setup() {
   u8g2.drawStr(4, 36, "Fetching data...");
   u8g2.sendBuffer();
 
-  fetchAstro();
-  lastFetch = millis();
+  // Weather fetch runs before the (non-essential) geocode lookup below —
+  // back-to-back HTTPS/TLS requests right after boot can strain the
+  // ESP8266's limited RAM, and the forecast is the actual point of this
+  // device, so it gets first crack at a clean memory state.
+  doFetchAstro();
   lastScreenChange = millis();
+
+  // Resolve a human-readable place name once per location change (or once
+  // on first boot if it's never been resolved) — cached in settings.json
+  // afterwards so this isn't called on every boot.
+  if (strcmp(locationName, "Location Unknown") == 0) {
+    Serial.println("[GEO] Resolving location name...");
+    if (fetchLocationName(homeLat, homeLon)) {
+      saveSettings(homeLat, homeLon, tzString, locationName);
+    } else {
+      Serial.println("[GEO] Lookup failed, using \"Location Unknown\"");
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
 // Loop
 // ---------------------------------------------------------------------------
 void loop() {
+  // FLASH button (GPIO0): press any time to open the setup portal (release
+  // quickly), or keep holding 5+ seconds for a factory reset that wipes the
+  // saved WiFi credentials and settings.json, then restarts into a blank
+  // portal. See runWifiSetup() for why this is only ever checked here, in
+  // loop(), rather than at boot.
+  if (digitalRead(0) == LOW) {
+    u8g2.clearBuffer();
+    u8g2.setFont(u8g2_font_5x7_tr);
+    u8g2.drawStr(4, 16, "Button held");
+    u8g2.drawStr(4, 30, "Release now: SETUP");
+    u8g2.drawStr(4, 42, "Keep holding 5s for:");
+    u8g2.drawStr(4, 52, "FACTORY RESET");
+    u8g2.sendBuffer();
+
+    uint32_t holdStart = millis();
+    while (digitalRead(0) == LOW && millis() - holdStart < 5000) {
+      delay(50);
+    }
+
+    if (millis() - holdStart >= 5000) {
+      Serial.println("[CFG] Factory reset requested — erasing WiFi + settings");
+      u8g2.clearBuffer();
+      u8g2.setFont(u8g2_font_6x12_tr);
+      u8g2.drawStr(4, 28, "FACTORY RESET");
+      u8g2.setFont(u8g2_font_5x7_tr);
+      u8g2.drawStr(4, 44, "Erasing + restarting");
+      u8g2.sendBuffer();
+
+      WiFiManager wm;
+      wm.resetSettings();                // erase saved WiFi credentials
+      LittleFS.remove("/settings.json"); // erase saved location/timezone
+      delay(1500);
+      ESP.restart();
+      // never reached
+    } else {
+      // Short press — open the portal now. If the user saves, runWifiSetup()
+      // restarts the device itself and never returns. If they back out or it
+      // times out, we just fall through and resume normal operation below.
+      runWifiSetup(true);
+    }
+  }
+
   // Screen rotation
   if (millis() - lastScreenChange >= SCREEN_DWELL_MS) {
     screen = (screen + 1) % NUM_SCREENS;
     lastScreenChange = millis();
   }
 
-  // Periodic data refresh
-  if (millis() - lastFetch >= FETCH_INTERVAL_MS) {
-    fetchAstro();
-    lastFetch = millis();
+  // Periodic data refresh. While we don't have valid data yet, retry every
+  // 10 seconds for the first 10 attempts (fast recovery from a bad
+  // boot-time fetch), then back off to every 60 seconds — the on-screen
+  // message switches at that point to suggest a power cycle if it's still
+  // not resolving on its own.
+  uint32_t retryInterval;
+  if (dataValid) {
+    retryInterval = FETCH_INTERVAL_MS;
+  } else if (fetchAttempts < 10) {
+    retryInterval = 10000UL;
+  } else {
+    retryInterval = 60000UL;
+  }
+  if (millis() - lastFetch >= retryInterval) {
+    doFetchAstro();
   }
 
   // Draw
