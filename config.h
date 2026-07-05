@@ -2,22 +2,23 @@
 
 // =============================================================================
 // Astro Sky Conditions Monitor — Configuration
-// Edit this file with your own settings before uploading.
 // =============================================================================
-
-// ---------------------------------------------------------------------------
-// WiFi
-// ---------------------------------------------------------------------------
-#define WIFI_SSID       "YOUR_WIFI_SSID"
-#define WIFI_PASSWORD   "YOUR_WIFI_PASSWORD"
+// WiFi is no longer configured here. On first boot the device opens a setup
+// portal ("AstroMonitor-Setup") where you pick your WiFi network and enter
+// your location/timezone — see README.md. Hold the FLASH button (GPIO0)
+// during power-on/reset to reopen that portal later.
+//
+// The values below are just the initial defaults shown in the setup portal
+// (and the fallback if settings haven't been saved yet).
+// =============================================================================
 
 // ---------------------------------------------------------------------------
 // Location
 // Decimal degrees. Negative = South / West.
 // Find yours at: https://www.latlong.net
 // ---------------------------------------------------------------------------
-#define HOME_LAT   -27.47779    // Get your location from https://www.latlong.net
-#define HOME_LON   53.029840
+#define HOME_LAT   -27.4698    // Get your location from https://www.latlong.net (default: Brisbane, QLD)
+#define HOME_LON   153.0251
 
 // ---------------------------------------------------------------------------
 // Timezone (POSIX format)

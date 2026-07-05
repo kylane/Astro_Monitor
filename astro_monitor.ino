@@ -8,12 +8,21 @@
 // Libraries (install from Arduino Library Manager):
 //   - U8g2        by olikraus
 //   - ArduinoJson by Benoit Blanchon (v7.x)
+//   - WiFiManager by tzapu
 //
 // Wiring (I2C):
 //   OLED GND -> GND
 //   OLED VCC -> 3V3
 //   OLED SCL -> GPIO5 (D1)
 //   OLED SDA -> GPIO4 (D2)
+//
+// WiFi / location setup:
+//   On first boot (or if WiFi can't connect), the device opens a setup
+//   portal AP called "AstroMonitor-Setup". Connect to it and a captive
+//   portal page lets you pick your WiFi network and enter latitude,
+//   longitude and POSIX timezone.
+//   To reopen the portal later (e.g. to change location or WiFi), hold
+//   the board's FLASH button (GPIO0) while powering on / resetting.
 // =============================================================================
 
 #include <Arduino.h>
@@ -21,13 +30,16 @@
 #include <ESP8266HTTPClient.h>
 #include <WiFiClient.h>
 #include <WiFiClientSecure.h>
+#include <WiFiManager.h>
+#include <LittleFS.h>
 #include <U8g2lib.h>
 #include <Wire.h>
 #include <ArduinoJson.h>
 #include <time.h>
 
 // ---------------------------------------------------------------------------
-// Config — edit config.h with your WiFi credentials and location
+// Config — edit config.h for default location/timezone and display timing.
+// WiFi credentials are no longer stored here — see setup portal above.
 // ---------------------------------------------------------------------------
 #include "config.h"
 
@@ -66,6 +78,62 @@ char      initTime[12] = "";    // e.g. "2026062918"
 const uint8_t NUM_SCREENS = 5;
 uint8_t screen = 0;
 uint32_t lastScreenChange = 0;
+
+// ---------------------------------------------------------------------------
+// Runtime settings — lat/lon/timezone/location name, editable via the setup
+// portal and persisted to LittleFS. WiFi credentials are persisted
+// separately by WiFiManager/the ESP8266 SDK itself.
+// ---------------------------------------------------------------------------
+float homeLat = HOME_LAT;
+float homeLon = HOME_LON;
+char  tzString[64];
+char  locationName[40] = "Location Unknown";
+
+void loadSettings() {
+  strncpy(tzString, TIMEZONE, sizeof(tzString) - 1);
+  tzString[sizeof(tzString) - 1] = '\0';
+
+  if (!LittleFS.begin()) {
+    Serial.println("[CFG] LittleFS mount failed, using defaults");
+    return;
+  }
+  if (!LittleFS.exists("/settings.json")) return;
+
+  File f = LittleFS.open("/settings.json", "r");
+  if (!f) return;
+  JsonDocument doc;
+  DeserializationError err = deserializeJson(doc, f);
+  f.close();
+  if (err) {
+    Serial.printf("[CFG] settings.json parse error: %s\n", err.c_str());
+    return;
+  }
+
+  homeLat = doc["lat"] | HOME_LAT;
+  homeLon = doc["lon"] | HOME_LON;
+  strncpy(tzString, doc["tz"] | TIMEZONE, sizeof(tzString) - 1);
+  tzString[sizeof(tzString) - 1] = '\0';
+  strncpy(locationName, doc["loc"] | "Location Unknown", sizeof(locationName) - 1);
+  locationName[sizeof(locationName) - 1] = '\0';
+  Serial.printf("[CFG] Loaded lat=%.5f lon=%.5f tz=%s loc=%s\n", homeLat, homeLon, tzString, locationName);
+}
+
+void saveSettings(float lat, float lon, const char* tz, const char* loc) {
+  JsonDocument doc;
+  doc["lat"] = lat;
+  doc["lon"] = lon;
+  doc["tz"]  = tz;
+  doc["loc"] = loc;
+
+  File f = LittleFS.open("/settings.json", "w");
+  if (!f) {
+    Serial.println("[CFG] Failed to open settings.json for write");
+    return;
+  }
+  serializeJson(doc, f);
+  f.close();
+  Serial.println("[CFG] Settings saved to LittleFS");
+}
 
 // ---------------------------------------------------------------------------
 // Helpers: scale descriptions
@@ -167,7 +235,7 @@ bool fetchAstro() {
   char url[160];
   snprintf(url, sizeof(url),
     "https://www.7timer.info/bin/astro.php?lon=%.1f&lat=%.1f&ac=0&unit=metric&output=json&tzshift=0",
-    HOME_LON, HOME_LAT);
+    homeLon, homeLat);
 
   Serial.printf("[ASTRO] Fetching: %s\n", url);
 
@@ -233,6 +301,57 @@ bool fetchAstro() {
 }
 
 // ---------------------------------------------------------------------------
+// Resolve a human place name from lat/lon via BigDataCloud's free reverse
+// geocoding endpoint (no API key required, no signup). Only called once per
+// location change — the result is cached in settings.json afterwards.
+// ---------------------------------------------------------------------------
+bool fetchLocationName(float lat, float lon) {
+  WiFiClientSecure client;
+  client.setInsecure();   // skip certificate validation — fine for a public geocoding API
+  HTTPClient http;
+
+  char url[192];
+  snprintf(url, sizeof(url),
+    "https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=%.5f&longitude=%.5f&localityLanguage=en",
+    lat, lon);
+
+  Serial.printf("[GEO] Fetching: %s\n", url);
+  http.begin(client, url);
+  int code = http.GET();
+  if (code != 200) {
+    Serial.printf("[GEO] HTTP %d\n", code);
+    http.end();
+    return false;
+  }
+
+  String payload = http.getString();
+  http.end();
+
+  JsonDocument doc;
+  DeserializationError err = deserializeJson(doc, payload);
+  if (err) {
+    Serial.printf("[GEO] JSON error: %s\n", err.c_str());
+    return false;
+  }
+
+  const char* city     = doc["city"]                | "";
+  const char* locality = doc["locality"]             | "";
+  const char* region   = doc["principalSubdivision"] | "";
+  const char* country  = doc["countryName"]          | "";
+
+  const char* best = city[0] ? city : (locality[0] ? locality : (region[0] ? region : country));
+  if (!best || !best[0]) {
+    Serial.println("[GEO] No usable place name in response");
+    return false;
+  }
+
+  strncpy(locationName, best, sizeof(locationName) - 1);
+  locationName[sizeof(locationName) - 1] = '\0';
+  Serial.printf("[GEO] Resolved: %s\n", locationName);
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 // Drawing helpers
 // ---------------------------------------------------------------------------
 
@@ -265,7 +384,7 @@ void drawBar(int x, int y, int w, int h, int val, int maxVal) {
 // Score → GO / MARGINAL / NO GO label
 const char* goNoGo(int score) {
   if (score >= 85) return "PERFECT";
-  if (score >= 65) return "STILL A GO";
+  if (score >= 65) return "GOOD ENOUGH";
   if (score >= 45) return "OK";
   if (score >= 25) return "DOUBTFUL";
   return "NO GO";
@@ -285,6 +404,11 @@ const char* goNoGoSub(int score) {
 void screenTonite() {
   drawHeader("TONITE");
 
+  // Location name, centred, right under the header divider
+  u8g2.setFont(u8g2_font_4x6_tr);
+  int lw = u8g2.getStrWidth(locationName);
+  u8g2.drawStr((128 - lw) / 2, 15, locationName); // TONITE: resolved place name, Y=15
+
   if (!dataValid) {
     u8g2.setFont(u8g2_font_6x12_tr);
     u8g2.drawStr(4, 36, "FETCHING...");  // TONITE: loading message, Y=36
@@ -297,17 +421,17 @@ void screenTonite() {
   const char* sub     = goNoGoSub(curScore);
 
   // Score bar near top
-  drawBar(4, 12, 120, 6, curScore, 100);       // TONITE: score bar 0-100, Y=12
+  drawBar(4, 18, 120, 5, curScore, 100);       // TONITE: score bar 0-100, Y=18
 
   // Big verdict below bar
   u8g2.setFont(u8g2_font_7x14B_tr);
   int vw = u8g2.getStrWidth(verdict);
-  u8g2.drawStr((128 - vw) / 2, 30, verdict);   // TONITE: verdict text large centred, Y=30
+  u8g2.drawStr((128 - vw) / 2, 36, verdict);   // TONITE: verdict text large centred, Y=36
 
   // Subtitle
   u8g2.setFont(u8g2_font_5x7_tr);
   int sw = u8g2.getStrWidth(sub);
-  u8g2.drawStr((128 - sw) / 2, 40, sub);        // TONITE: subtitle centred, Y=40
+  u8g2.drawStr((128 - sw) / 2, 44, sub);        // TONITE: subtitle centred, Y=44
 
   // Current slot details
   if (slotCount > 0) {
@@ -315,7 +439,7 @@ void screenTonite() {
     char l[32];
     snprintf(l, sizeof(l), "CLD:%d  SEE:%d  TRN:%d",
              slots[0].cloudcover, slots[0].seeing, slots[0].transparency);
-    u8g2.drawStr(2, 50, l);              // TONITE: cloud/seeing/transparency ratings, Y=50
+    u8g2.drawStr(2, 52, l);              // TONITE: cloud/seeing/transparency ratings, Y=52
   }
 
   // Best tonight window
@@ -329,11 +453,11 @@ void screenTonite() {
     char l[32];
     snprintf(l, sizeof(l), "BEST WINDOW: %02d:00  SCR:%d",
              lt.tm_hour, calcScore(slots[best]));
-    u8g2.drawStr(2, 57, l);             // TONITE: best imaging window time + score, Y=57
+    u8g2.drawStr(2, 58, l);             // TONITE: best imaging window time + score, Y=58
     snprintf(l, sizeof(l), "%s", cloudText(slots[best].cloudcover));
     u8g2.drawStr(2, 63, l);             // TONITE: cloud description at best window, Y=63
   } else {
-    u8g2.drawStr(2, 57, "No good window tonight"); // TONITE: no good window message, Y=57
+    u8g2.drawStr(2, 58, "No good window tonight"); // TONITE: no good window message, Y=58
   }
 }
 
@@ -389,7 +513,7 @@ void screenClouds() {
 // Screen 3: SEEING — seeing + transparency ratings for next 6 slots
 // ---------------------------------------------------------------------------
 void screenSeeing() {
-  drawHeader("SEEING");
+  drawHeader("SEE RATING");
 
   if (!dataValid || slotCount == 0) {
     u8g2.setFont(u8g2_font_6x12_tr);
@@ -398,27 +522,31 @@ void screenSeeing() {
   }
 
   // Current slot — big seeing rating
+  u8g2.setFont(u8g2_font_5x7_tr);
+  u8g2.drawStr(2, 24, "SEE");            // SEEING: row label, X=2 Y=24
   u8g2.setFont(u8g2_font_7x14B_tr);
   char sv[3];
   snprintf(sv, sizeof(sv), "%d", slots[0].seeing);
-  u8g2.drawStr(2, 24, sv);              // SEEING: current seeing value large, X=2 Y=24
+  u8g2.drawStr(46, 24, sv);              // SEEING: current seeing value large, X=46 Y=24
   u8g2.setFont(u8g2_font_5x7_tr);
-  u8g2.drawStr(16, 24, "/8");           // SEEING: out-of-8 label, X=16 Y=24
-  u8g2.drawStr(30, 24, seeingText(slots[0].seeing)); // SEEING: seeing text, X=30 Y=24
+  u8g2.drawStr(55, 24, "/8");            // SEEING: out-of-8 label, X=55 Y=24
+  u8g2.drawStr(69, 24, seeingText(slots[0].seeing)); // SEEING: seeing text, X=69 Y=24
 
   // Transparency
+  u8g2.setFont(u8g2_font_5x7_tr);
+  u8g2.drawStr(2, 38, "TRANSPCY");       // SEEING: row label, X=2 Y=38
   u8g2.setFont(u8g2_font_7x14B_tr);
   char tv[3];
   snprintf(tv, sizeof(tv), "%d", slots[0].transparency);
-  u8g2.drawStr(2, 38, tv);              // SEEING: current transparency value large, X=2 Y=38
+  u8g2.drawStr(46, 38, tv);              // SEEING: current transparency value large, X=46 Y=38
   u8g2.setFont(u8g2_font_5x7_tr);
-  u8g2.drawStr(16, 38, "/8");           // SEEING: out-of-8 label, X=16 Y=38
-  u8g2.drawStr(30, 38, transText(slots[0].transparency)); // SEEING: transparency text, X=30 Y=38
+  u8g2.drawStr(55, 38, "/8");            // SEEING: out-of-8 label, X=55 Y=38
+  u8g2.drawStr(69, 38, transText(slots[0].transparency)); // SEEING: transparency text, X=69 Y=38
 
   // Lifted index
   u8g2.setFont(u8g2_font_5x7_tr);
-  char li[12];
-  snprintf(li, sizeof(li), "LFT IDX: %+d", slots[0].liftedindex);
+  char li[16];
+  snprintf(li, sizeof(li), "STABILITY: %+d", slots[0].liftedindex);
   u8g2.drawStr(2, 50, li);             // SEEING: lifted index (stability), X=2 Y=50
   const char* stab = (slots[0].liftedindex >= 2)  ? "STABLE" :
                      (slots[0].liftedindex >= -2)  ? "NEUTRAL" : "UNSTABLE";
@@ -426,8 +554,8 @@ void screenSeeing() {
 
   // Mini seeing trend for next slots
   u8g2.setFont(u8g2_font_4x6_tr);
-  u8g2.drawStr(2, 62, "SEE:");          // SEEING: trend label, X=2 Y=62
-  int tx = 26;
+  u8g2.drawStr(2, 62, "TREND:");        // SEEING: trend label, X=2 Y=62
+  int tx = 30;
   for (uint8_t i = 0; i < min((int)slotCount, 5); i++) {
     char s[3];
     snprintf(s, sizeof(s), "%d", slots[i].seeing);
@@ -537,15 +665,66 @@ void setup() {
   u8g2.drawStr(4, 36, "Connecting WiFi");
   u8g2.sendBuffer();
 
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  uint32_t wt = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - wt < 20000) {
-    delay(500);
-    Serial.print(".");
+  loadSettings();
+
+  // Hold the FLASH button (GPIO0) while powering on / resetting to force
+  // the setup portal open, even if WiFi is already configured.
+  pinMode(0, INPUT_PULLUP);
+  bool forcePortal = (digitalRead(0) == LOW);
+
+  char latStr[16], lonStr[16];
+  snprintf(latStr, sizeof(latStr), "%.5f", homeLat);
+  snprintf(lonStr, sizeof(lonStr), "%.5f", homeLon);
+
+  WiFiManagerParameter html_latlon_link(
+    "<p style='margin:8px 0 2px'>Find your <b>latitude/longitude</b> at "
+    "<a href='https://www.latlong.net' target='_blank'>latlong.net</a><br>"
+    "<small>(this link may not load once you're connected to this WiFi — if so, "
+    "look it up beforehand, write it down, and come back to enter it below)</small></p>");
+  WiFiManagerParameter custom_lat("lat", "Latitude", latStr, sizeof(latStr) - 1);
+  WiFiManagerParameter custom_lon("lon", "Longitude", lonStr, sizeof(lonStr) - 1);
+  WiFiManagerParameter html_tz_link(
+    "<p style='margin:8px 0 2px'>Find your <b>POSIX timezone string</b> in "
+    "<a href='https://github.com/nayarsystems/posix_tz_db/blob/master/zones.csv' target='_blank'>this list</a><br>"
+    "<small>(this link may not load once you're connected to this WiFi — if so, "
+    "look it up beforehand, write it down, and come back to enter it below)</small></p>");
+  WiFiManagerParameter custom_tz("tz", "POSIX Timezone", tzString, sizeof(tzString) - 1);
+
+  bool settingsSaved = false;
+  WiFiManager wm;
+  wm.addParameter(&html_latlon_link);
+  wm.addParameter(&custom_lat);
+  wm.addParameter(&custom_lon);
+  wm.addParameter(&html_tz_link);
+  wm.addParameter(&custom_tz);
+  wm.setSaveConfigCallback([&settingsSaved]() { settingsSaved = true; });
+  wm.setAPCallback([](WiFiManager*) {
+    u8g2.clearBuffer();
+    u8g2.setFont(u8g2_font_6x12_tr);
+    u8g2.drawStr(4, 16, "SETUP MODE");
+    u8g2.setFont(u8g2_font_5x7_tr);
+    u8g2.drawStr(4, 32, "Join WiFi:");
+    u8g2.drawStr(4, 42, "AstroMonitor-Setup");
+    u8g2.drawStr(4, 56, "Then open 192.168.4.1");
+    u8g2.sendBuffer();
+  });
+  wm.setConfigPortalTimeout(300);   // give up and continue after 5 min
+
+  bool connected = forcePortal
+    ? wm.startConfigPortal("AstroMonitor-Setup")
+    : wm.autoConnect("AstroMonitor-Setup");
+
+  if (settingsSaved) {
+    homeLat = atof(custom_lat.getValue());
+    homeLon = atof(custom_lon.getValue());
+    strncpy(tzString, custom_tz.getValue(), sizeof(tzString) - 1);
+    tzString[sizeof(tzString) - 1] = '\0';
+    // Location changed — old resolved name no longer applies until re-geocoded
+    strncpy(locationName, "Location Unknown", sizeof(locationName) - 1);
+    locationName[sizeof(locationName) - 1] = '\0';
   }
 
-  if (WiFi.status() != WL_CONNECTED) {
+  if (!connected) {
     u8g2.clearBuffer();
     u8g2.drawStr(4, 30, "WIFI FAILED");
     u8g2.sendBuffer();
@@ -555,9 +734,34 @@ void setup() {
 
   Serial.printf("\n[ASTRO] WiFi connected: %s\n", WiFi.localIP().toString().c_str());
 
+  // Coming out of the setup portal leaves the radio in AP+STA mode (the
+  // portal runs its own AP alongside the STA connection). Force pure STA
+  // and give the network stack — DNS in particular — a moment to settle
+  // before making any HTTPS requests. Skipping this is why the very first
+  // fetch right after a portal save can fail until the next full power
+  // cycle: a cold boot never goes through an AP+STA transition, so it
+  // doesn't hit this window.
+  WiFi.mode(WIFI_STA);
+  delay(1500);
+
+  // Resolve a human-readable place name once per location change (or once
+  // on first boot if it's never been resolved) — cached in settings.json
+  // afterwards so this isn't called on every boot.
+  bool needGeoLookup = settingsSaved || strcmp(locationName, "Location Unknown") == 0;
+  if (needGeoLookup) {
+    Serial.println("[GEO] Resolving location name...");
+    if (!fetchLocationName(homeLat, homeLon)) {
+      Serial.println("[GEO] Lookup failed, using \"Location Unknown\"");
+    }
+  }
+
+  if (settingsSaved || needGeoLookup) {
+    saveSettings(homeLat, homeLon, tzString, locationName);
+  }
+
   // Sync time
   configTime(0, 0, "pool.ntp.org", "time.google.com");
-  setenv("TZ", TIMEZONE, 1);
+  setenv("TZ", tzString, 1);
   tzset();
   Serial.print("[ASTRO] Syncing NTP");
   uint32_t nt = millis();

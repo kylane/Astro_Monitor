@@ -31,7 +31,7 @@ A standalone ESP8266 device that fetches real-time astronomy weather forecasts a
 
 - **Board:** NodeMCU 1.0 (ESP-12E Module)
 - **Upload Speed:** 115200
-- **Flash Size:** 4MB
+- **Flash Size:** 4MB (FS:2MB OTA:~1019KB) — must include a filesystem partition for LittleFS
 
 Add the ESP8266 board package URL if you haven't already:
 ```
@@ -40,20 +40,19 @@ https://arduino.esp8266.com/stable/package_esp8266com_index.json
 
 ### 2. Libraries
 
-Install both from **Sketch → Include Library → Manage Libraries**:
+Install all from **Sketch → Include Library → Manage Libraries**:
 
 | Library | Author | Version |
 |---------|--------|---------|
 | U8g2 | olikraus | latest |
 | ArduinoJson | Benoit Blanchon | 7.x |
+| WiFiManager | tzapu | latest |
 
 ### 3. Configuration
 
-Edit `config.h` before uploading:
+`config.h` only holds fallback defaults now (location, timezone, display timing) — WiFi credentials aren't stored in code at all. You can leave it as-is and set everything up from the device itself; see **WiFi & Location Setup** below.
 
 ```cpp
-#define WIFI_SSID      "your_network_name"
-#define WIFI_PASSWORD  "your_password"
 #define HOME_LAT       -27.65973   // your latitude
 #define HOME_LON       152.88028   // your longitude
 #define TIMEZONE       "AEST-10"   // your POSIX timezone string
@@ -66,9 +65,24 @@ https://github.com/nayarsystems/posix_tz_db/blob/master/zones.csv
 
 ---
 
-## Data Source
+## WiFi & Location Setup
 
-All forecast data comes from **7Timer!** (https://www.7timer.info), a free public astronomy weather service based on NOAA/NCEP GFS numerical weather models. No API key is required. Data is fetched every 30 minutes and covers the next 72 hours in 3-hour slots.
+The device configures itself over WiFi — no code editing or re-flashing needed to change network, location or timezone.
+
+**First boot:** the OLED will show "SETUP MODE". From your phone or laptop, join the WiFi network **`AstroMonitor-Setup`**, and a setup page should open automatically (if not, browse to `192.168.4.1`). Pick your home WiFi network and enter its password, plus your latitude, longitude and POSIX timezone string, then save. The device reboots and connects.
+
+**To change settings later** (new WiFi network, moved house, etc.): hold the board's **FLASH button** (the one wired to GPIO0) while powering on or pressing RST, and keep holding it for a couple of seconds until "SETUP MODE" appears on screen. Then reconnect to `AstroMonitor-Setup` as above.
+
+Settings are stored on the device (LittleFS for location/timezone, the ESP8266's own WiFi flash storage for network credentials) and survive power loss and re-uploading the sketch.
+
+After connecting, the device automatically looks up a human-readable place name for your coordinates (e.g. "Brisbane") and shows it on the TONITE screen for confirmation that the location is right. If the lookup fails (or hasn't run yet), it falls back to showing "Location Unknown" — this doesn't affect forecasts, which are driven entirely by lat/lon.
+
+---
+
+## Data Sources
+
+- **7Timer!** (https://www.7timer.info) — free public astronomy weather service based on NOAA/NCEP GFS numerical weather models. No API key required. Data is fetched every ~30 minutes and covers the next 72 hours in 3-hour slots.
+- **BigDataCloud reverse geocoding** (https://www.bigdatacloud.net) — free, no API key required, used only to resolve your lat/lon into a place name for display. Called once when your location is first set or changed (the result is cached), not on a recurring schedule.
 
 ---
 
@@ -84,8 +98,9 @@ The device rotates through 5 screens, each displayed for 6 seconds.
 
 ```
 TONITE 1/5                 21:04:33
+             Brisbane
 ████████████████░░░░░░░░░░░░░░░░  ← score bar
-         STILL A GO
+        GOOD ENOUGH
       Conditions are good
 CLD:5  SEE:6  TRN:4
 BEST WINDOW: 23:00  SCR:82
@@ -99,7 +114,7 @@ FEW CLOUDS
 | Verdict | Score | Meaning |
 |---------|-------|---------|
 | PERFECT | 85–100 | Exceptional night, ideal for imaging |
-| STILL A GO | 65–84 | Good conditions, worth setting up |
+| GOOD ENOUGH | 65–84 | Good conditions, worth setting up |
 | OK | 45–64 | Marginal but usable |
 | DOUBTFUL | 25–44 | Poor conditions, probably not worth it |
 | NO GO | 0–24 | Bad conditions, stay inside |
@@ -151,11 +166,11 @@ Cloud cover scale:
 **Atmospheric seeing and transparency — how steady and clear the air is.**
 
 ```
-SEEING 3/5                 21:04:33
-6  /8  GOOD
-5  /8  ABOVE AVG
-LFT IDX: +6              STABLE
-SEE: 6  6  5  4  4
+SEE RATING 3/5              21:04:33
+SEE           6  /8  GOOD
+TRANSPCY      5  /8  ABOVE AVG
+STABILITY: +6              STABLE
+TREND: 6  6  5  4  4
 ```
 
 **Seeing** measures atmospheric turbulence. Poor seeing causes stars to twinkle and blur, reducing sharpness in long-exposure images. Scale 1–8:
