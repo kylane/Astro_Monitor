@@ -5,8 +5,9 @@
 // =============================================================================
 // WiFi is no longer configured here. On first boot the device opens a setup
 // portal ("AstroMonitor-Setup") where you pick your WiFi network and enter
-// your location/timezone — see README.md. Hold the FLASH button (GPIO0)
-// during power-on/reset to reopen that portal later.
+// your location/timezone/rotation time — see README.md. Press the FLASH
+// button (GPIO0) at any time while the device is running to reopen that
+// portal later (hold 5+ seconds instead for a full factory reset).
 //
 // The values below are just the initial defaults shown in the setup portal
 // (and the fallback if settings haven't been saved yet).
@@ -33,7 +34,9 @@
 
 // ---------------------------------------------------------------------------
 // Display timing
+// SCREEN_DWELL_MS is just the initial default — it's editable from the setup
+// portal ("Screen rotation time") afterwards, same as location/timezone.
 // ---------------------------------------------------------------------------
-#define SCREEN_DWELL_MS    6000             // milliseconds each screen is shown
+#define SCREEN_DWELL_MS    10000            // milliseconds each screen is shown (default: 10s)
 #define FETCH_INTERVAL_MS  (30UL*60*1000)  // how often to re-fetch from 7timer (30 min)
 #define FETCH_RETRIES      3               // number of retries on malformed JSON

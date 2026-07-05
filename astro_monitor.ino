@@ -83,14 +83,15 @@ uint8_t screen = 0;
 uint32_t lastScreenChange = 0;
 
 // ---------------------------------------------------------------------------
-// Runtime settings — lat/lon/timezone/location name, editable via the setup
-// portal and persisted to LittleFS. WiFi credentials are persisted
-// separately by WiFiManager/the ESP8266 SDK itself.
+// Runtime settings — lat/lon/timezone/location name/rotation time, editable
+// via the setup portal and persisted to LittleFS. WiFi credentials are
+// persisted separately by WiFiManager/the ESP8266 SDK itself.
 // ---------------------------------------------------------------------------
 float homeLat = HOME_LAT;
 float homeLon = HOME_LON;
 char  tzString[64];
 char  locationName[40] = "Location Unknown";
+uint32_t screenDwellMs = SCREEN_DWELL_MS;
 
 void loadSettings() {
   strncpy(tzString, TIMEZONE, sizeof(tzString) - 1);
@@ -118,15 +119,18 @@ void loadSettings() {
   tzString[sizeof(tzString) - 1] = '\0';
   strncpy(locationName, doc["loc"] | "Location Unknown", sizeof(locationName) - 1);
   locationName[sizeof(locationName) - 1] = '\0';
-  Serial.printf("[CFG] Loaded lat=%.5f lon=%.5f tz=%s loc=%s\n", homeLat, homeLon, tzString, locationName);
+  screenDwellMs = doc["dwell"] | SCREEN_DWELL_MS;
+  Serial.printf("[CFG] Loaded lat=%.5f lon=%.5f tz=%s loc=%s dwell=%lums\n",
+                homeLat, homeLon, tzString, locationName, screenDwellMs);
 }
 
-void saveSettings(float lat, float lon, const char* tz, const char* loc) {
+void saveSettings(float lat, float lon, const char* tz, const char* loc, uint32_t dwellMs) {
   JsonDocument doc;
-  doc["lat"] = lat;
-  doc["lon"] = lon;
-  doc["tz"]  = tz;
-  doc["loc"] = loc;
+  doc["lat"]   = lat;
+  doc["lon"]   = lon;
+  doc["tz"]    = tz;
+  doc["loc"]   = loc;
+  doc["dwell"] = dwellMs;
 
   File f = LittleFS.open("/settings.json", "w");
   if (!f) {
@@ -703,11 +707,19 @@ void screenForecast() {
 // device ourselves (ESP.restart()) rather than asking them to power cycle —
 // this guarantees NTP/timezone/geocode/forecast all re-initialize cleanly
 // with the new values, and this function never returns in that case.
+//
+// If the submitted WiFi credentials fail to connect, WiFiManager's default
+// behaviour is to silently keep retrying inside the same blocking call with
+// no visible feedback on our OLED — setBreakAfterConfig(true) makes it
+// return to us after any submission (success or failure) instead, so we can
+// show a clear "couldn't connect, reopening" message and let the user try
+// again immediately rather than staring at a frozen "SETUP MODE" screen.
 // ---------------------------------------------------------------------------
 bool runWifiSetup(bool forcePortal) {
-  char latStr[16], lonStr[16];
+  char latStr[16], lonStr[16], dwellStr[8];
   snprintf(latStr, sizeof(latStr), "%.5f", homeLat);
   snprintf(lonStr, sizeof(lonStr), "%.5f", homeLon);
+  snprintf(dwellStr, sizeof(dwellStr), "%lu", (unsigned long)(screenDwellMs / 1000));
 
   WiFiManagerParameter html_latlon_link(
     "<p style='margin:8px 0 2px'>Find your <b>latitude/longitude</b> at "
@@ -722,6 +734,7 @@ bool runWifiSetup(bool forcePortal) {
     "<small>(this link may not load once you're connected to this WiFi — if so, "
     "look it up beforehand, write it down, and come back to enter it below)</small></p>");
   WiFiManagerParameter custom_tz("tz", "POSIX Timezone", tzString, sizeof(tzString) - 1);
+  WiFiManagerParameter custom_dwell("dwell", "Screen rotation time (seconds)", dwellStr, sizeof(dwellStr) - 1);
 
   bool settingsSaved = false;
   WiFiManager wm;
@@ -730,6 +743,7 @@ bool runWifiSetup(bool forcePortal) {
   wm.addParameter(&custom_lon);
   wm.addParameter(&html_tz_link);
   wm.addParameter(&custom_tz);
+  wm.addParameter(&custom_dwell);
   wm.setSaveConfigCallback([&settingsSaved]() { settingsSaved = true; });
   wm.setAPCallback([](WiFiManager*) {
     u8g2.clearBuffer();
@@ -741,21 +755,51 @@ bool runWifiSetup(bool forcePortal) {
     u8g2.drawStr(4, 56, "Then open 192.168.4.1");
     u8g2.sendBuffer();
   });
-  wm.setConfigPortalTimeout(300);   // give up and continue after 5 min
+  wm.setConfigPortalTimeout(300);     // give up and continue after 5 min
+  wm.setBreakAfterConfig(true);       // return to us even if the connect attempt fails
 
-  bool connected = forcePortal
-    ? wm.startConfigPortal("AstroMonitor-Setup")
-    : wm.autoConnect("AstroMonitor-Setup");
+  bool connected = false;
+  bool firstAttempt = true;
+  while (true) {
+    settingsSaved = false;
+    connected = (forcePortal || !firstAttempt)
+      ? wm.startConfigPortal("AstroMonitor-Setup")
+      : wm.autoConnect("AstroMonitor-Setup");
+    firstAttempt = false;
 
-  if (settingsSaved) {
+    if (!settingsSaved) break;   // nothing submitted (timed out / abandoned) — stop
+    if (connected) break;        // submitted and connected — fall through to apply it
+
+    // Submitted, but the new WiFi credentials didn't connect — say so and
+    // reopen the portal for another attempt instead of silently retrying.
+    Serial.println("[CFG] WiFi connect failed after portal submit — reopening setup");
+    u8g2.clearBuffer();
+    u8g2.setFont(u8g2_font_6x12_tr);
+    u8g2.drawStr(4, 18, "WIFI FAILED");
+    u8g2.setFont(u8g2_font_5x7_tr);
+    u8g2.drawStr(4, 34, "Could not connect to");
+    u8g2.drawStr(4, 44, "that network.");
+    u8g2.drawStr(4, 56, "Reopening setup...");
+    u8g2.sendBuffer();
+    delay(3000);
+    forcePortal = true;   // make sure the retry reopens the portal
+  }
+
+  if (settingsSaved && connected) {
     homeLat = atof(custom_lat.getValue());
     homeLon = atof(custom_lon.getValue());
     strncpy(tzString, custom_tz.getValue(), sizeof(tzString) - 1);
     tzString[sizeof(tzString) - 1] = '\0';
+
+    long dwellSec = atol(custom_dwell.getValue());
+    if (dwellSec < 2) dwellSec = 2;       // keep rotation sane at either extreme
+    if (dwellSec > 120) dwellSec = 120;
+    screenDwellMs = (uint32_t)dwellSec * 1000UL;
+
     // Location changed — old resolved name no longer applies until re-geocoded
     strncpy(locationName, "Location Unknown", sizeof(locationName) - 1);
     locationName[sizeof(locationName) - 1] = '\0';
-    saveSettings(homeLat, homeLon, tzString, locationName);
+    saveSettings(homeLat, homeLon, tzString, locationName, screenDwellMs);
 
     u8g2.clearBuffer();
     u8g2.setFont(u8g2_font_6x12_tr);
@@ -852,7 +896,7 @@ void setup() {
   if (strcmp(locationName, "Location Unknown") == 0) {
     Serial.println("[GEO] Resolving location name...");
     if (fetchLocationName(homeLat, homeLon)) {
-      saveSettings(homeLat, homeLon, tzString, locationName);
+      saveSettings(homeLat, homeLon, tzString, locationName, screenDwellMs);
     } else {
       Serial.println("[GEO] Lookup failed, using \"Location Unknown\"");
     }
@@ -906,7 +950,7 @@ void loop() {
   }
 
   // Screen rotation
-  if (millis() - lastScreenChange >= SCREEN_DWELL_MS) {
+  if (millis() - lastScreenChange >= screenDwellMs) {
     screen = (screen + 1) % NUM_SCREENS;
     lastScreenChange = millis();
   }

@@ -67,9 +67,11 @@ https://github.com/nayarsystems/posix_tz_db/blob/master/zones.csv
 
 ## WiFi & Location Setup
 
-The device configures itself over WiFi — no code editing or re-flashing needed to change network, location or timezone.
+The device configures itself over WiFi — no code editing or re-flashing needed to change network, location, timezone or screen rotation time.
 
-**First boot:** the OLED will show "SETUP MODE". From your phone or laptop, join the WiFi network **`AstroMonitor-Setup`**, and a setup page should open automatically (if not, browse to `192.168.4.1`). Pick your home WiFi network and enter its password, plus your latitude, longitude and POSIX timezone string, then save. The device reboots and connects.
+**First boot:** the OLED will show "SETUP MODE". From your phone or laptop, join the WiFi network **`AstroMonitor-Setup`**, and a setup page should open automatically (if not, browse to `192.168.4.1`). Pick your home WiFi network and enter its password, plus your latitude, longitude, POSIX timezone string, and how long each screen should stay up before rotating to the next one ("Screen rotation time", in seconds — defaults to 10), then save. The device reboots and connects.
+
+If the WiFi password you entered doesn't work, the OLED shows "WIFI FAILED / Could not connect to that network / Reopening setup..." and the portal automatically reopens after a few seconds so you can try again — you don't need to press the button again.
 
 **To change settings later** (new WiFi network, moved house, etc.): while the device is running normally (showing the rotating screens), press the board's **FLASH button** (the unlabelled one next to the USB port, wired to GPIO0 — not the RST button). The OLED will prompt you:
 - **Release it right away** to just open the setup portal, pre-filled with your current WiFi/location/timezone as editable defaults — nothing is erased until you save. Once saved, the device restarts on its own to apply the new settings.
@@ -253,11 +255,11 @@ Columns:
 
 ## Adjusting behaviour
 
-All timing and location settings are in `config.h`:
+`SCREEN_DWELL_MS` is now editable from the setup portal ("Screen rotation time") — see **WiFi & Location Setup** above. The rest are compile-time only, in `config.h`:
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `SCREEN_DWELL_MS` | 6000 | Milliseconds each screen is shown |
+| `SCREEN_DWELL_MS` | 10000 | Initial/fallback rotation time (ms) — overridden once set via the portal |
 | `FETCH_INTERVAL_MS` | 1800000 | How often data is re-fetched (30 min) |
 | `FETCH_RETRIES` | 3 | Retries if 7timer returns malformed JSON |
 
