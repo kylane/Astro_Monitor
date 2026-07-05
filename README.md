@@ -16,12 +16,12 @@ A standalone ESP8266 device that fetches real-time astronomy weather forecasts a
 
 ### Wiring
 
-| OLED Pin | ESP8266 Pin |
-|----------|-------------|
-| GND | GND |
-| VCC | 3V3 |
-| SCL | GPIO5 (D1) |
-| SDA | GPIO4 (D2) |
+| OLED Pin | ESP8266 GPIO | NodeMCU/D1 Mini Label | FREENOVE ESP8266 Board Label |
+|----------|--------------|------------------------|-------------------------------|
+| GND | — | GND | GND |
+| VCC | — | 3V3 | 3V3 |
+| SCL | GPIO5 | D1 | 5 |
+| SDA | GPIO4 | D2 | 4 |
 
 ---
 
