@@ -94,7 +94,7 @@ After connecting, the device automatically looks up a human-readable place name 
 
 ## Screens
 
-The device rotates through 5 screens, each displayed for 6 seconds.
+The device rotates through 6 screens, each displayed for 6 seconds.
 
 ---
 
@@ -253,6 +253,27 @@ Columns:
 
 ---
 
+### Screen 6 — SYSTEM
+
+**Uptime and data-fetch health — useful for confirming the device is actually still updating.**
+
+```
+SYSTEM 6/6                21:04:33
+UP  2d 03:14:22
+UPD  20:34:12 3h05m ago
+NEXT in 12m30s
+STATUS  OK
+```
+
+- **UP** — time elapsed since the device last booted
+- **UPD** — local time of the last *successful* data fetch, and how long ago that was
+- **NEXT** — countdown to the next scheduled fetch attempt
+- **STATUS** — result of the most recent fetch attempt: `OK`, or `FAILED x<n>` showing the number of consecutive failures since the last success
+
+If **UPD** keeps climbing (hours old) instead of resetting back near zero every ~30 minutes, fetches have stopped succeeding — check WiFi, or see **Notes** below about the automatic recovery restart.
+
+---
+
 ## Adjusting behaviour
 
 `SCREEN_DWELL_MS` is now editable from the setup portal ("Screen rotation time") — see **WiFi & Location Setup** above. The rest are compile-time only, in `config.h`:
@@ -262,6 +283,7 @@ Columns:
 | `SCREEN_DWELL_MS` | 10000 | Initial/fallback rotation time (ms) — overridden once set via the portal |
 | `FETCH_INTERVAL_MS` | 1800000 | How often data is re-fetched (30 min) |
 | `FETCH_RETRIES` | 3 | Retries if 7timer returns malformed JSON |
+| `STALE_DATA_RESTART_SEC` | 10800 (3h) | If data hasn't refreshed in this long despite having worked before, restart automatically to recover |
 
 ---
 
@@ -272,6 +294,8 @@ Columns:
 - Data covers 72 hours ahead in 3-hour slots
 - This project uses HTTP**S** to connect to 7timer with certificate verification disabled (acceptable for a public weather API with no sensitive data)
 - If no forecast data has been fetched successfully yet, the device shows "Refreshing data" and retries every 10 seconds for the first 10 attempts, then backs off to retrying every 60 seconds with a "Retrying... try a power cycle if this persists" message. This is normal recovery behaviour after a fresh boot and usually resolves within a minute or two on its own.
+- If the device *has* successfully fetched data before but then goes 3+ hours without a successful refresh (e.g. from ESP8266 HTTPS/TLS heap fragmentation after long uptime), it now restarts itself automatically to clear the problem, rather than silently displaying the same stale forecast indefinitely. Check the **SYSTEM** screen any time to confirm data is actually current.
+- All on-screen forecast times (CLOUDS, FORECAST, TONITE's best window) are calculated from the last successful fetch time, not the live clock — so they stay accurate even if a refresh is overdue, instead of drifting forward with real time while showing stale data.
 
 ---
 

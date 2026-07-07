@@ -3,7 +3,7 @@
 // ESP8266 + 1.3" SH1106 I2C OLED
 //
 // Uses 7timer.info "astro" product (no API key needed, HTTP only)
-// Rotates through 5 screens showing astronomy-relevant conditions.
+// Rotates through 6 screens showing astronomy-relevant conditions.
 //
 // Libraries (install from Arduino Library Manager):
 //   - U8g2        by olikraus
@@ -75,10 +75,12 @@ uint8_t   slotCount = 0;
 bool      dataValid = false;
 uint32_t  lastFetch = 0;
 uint16_t  fetchAttempts = 0;    // consecutive attempts since the last success
+bool      lastFetchOk = false;  // result of the most recent fetch attempt
+time_t    lastFetchEpoch = 0;   // wall-clock time of the last *successful* fetch (0 = never)
 char      initTime[12] = "";    // e.g. "2026062918"
 
 // Screen rotation
-const uint8_t NUM_SCREENS = 5;
+const uint8_t NUM_SCREENS = 6;
 uint8_t screen = 0;
 uint32_t lastScreenChange = 0;
 
@@ -213,10 +215,11 @@ int bestNightSlot() {
   if (!dataValid || slotCount == 0) return -1;
   int bestIdx = -1;
   int bestScore = -1;
-  // Use local time to determine which timepoints fall in tonight's window
-  time_t now = time(nullptr);
+  // Anchor to the last successful fetch, not the live clock — timepoint is
+  // hours-from-fetch, so using time(nullptr) here would drift the mapping
+  // between slot and clock-hour further off the longer data goes stale.
   for (uint8_t i = 0; i < slotCount; i++) {
-    time_t slotTime = now + (slots[i].timepoint * 3600L);
+    time_t slotTime = lastFetchEpoch + (slots[i].timepoint * 3600L);
     struct tm lt;
     localtime_r(&slotTime, &lt);
     int h = lt.tm_hour;
@@ -310,11 +313,23 @@ bool fetchAstro() {
   return false;
 }
 
+// Mirrors the fetch cadence loop() schedules on: fast retry until the first
+// success, then a fixed interval afterwards. Shared with screenSystem() so
+// the on-screen countdown always matches what will actually happen.
+uint32_t currentRetryIntervalMs() {
+  if (dataValid) return FETCH_INTERVAL_MS;
+  if (fetchAttempts < 10) return 10000UL;
+  return 60000UL;
+}
+
 // Wraps fetchAstro() with the attempt counter that drives retry cadence and
-// on-screen messaging (see drawNoDataMessage() and the loop() refresh logic).
+// on-screen messaging (see drawNoDataMessage() and the loop() refresh logic),
+// plus the bookkeeping screenSystem() needs to show fetch health.
 void doFetchAstro() {
-  if (fetchAstro()) {
+  lastFetchOk = fetchAstro();
+  if (lastFetchOk) {
     fetchAttempts = 0;
+    lastFetchEpoch = time(nullptr);
   } else {
     fetchAttempts++;
   }
@@ -490,8 +505,7 @@ void screenTonite() {
   int best = bestNightSlot();
   u8g2.setFont(u8g2_font_4x6_tr);
   if (best >= 0) {
-    time_t now = time(nullptr);
-    time_t slotTime = now + (slots[best].timepoint * 3600L);
+    time_t slotTime = lastFetchEpoch + (slots[best].timepoint * 3600L);
     struct tm lt;
     localtime_r(&slotTime, &lt);
     char l[32];
@@ -531,8 +545,7 @@ void screenClouds() {
     u8g2.drawBox(x + 1, barY - barH + 1, barW - 2, barH - 2); // CLOUDS: cloud fill
     // Hour label
     u8g2.setFont(u8g2_font_5x7_tr);
-    time_t now = time(nullptr);
-    time_t slotTime = now + (slots[i].timepoint * 3600L);
+    time_t slotTime = lastFetchEpoch + (slots[i].timepoint * 3600L);
     struct tm lt;
     localtime_r(&slotTime, &lt);
     char h[6];
@@ -666,8 +679,7 @@ void screenForecast() {
   for (uint8_t i = 0; i < ROWS; i++) {
     int y = 30 + i * 13;               // 13px row spacing for 5x7 font
 
-    time_t now = time(nullptr);
-    time_t slotTime = now + (slots[i].timepoint * 3600L);
+    time_t slotTime = lastFetchEpoch + (slots[i].timepoint * 3600L);
     struct tm lt;
     localtime_r(&slotTime, &lt);
 
@@ -689,6 +701,61 @@ void screenForecast() {
     const char* go = raining ? "RAIN" : (score >= 85 ? "GO!" : score >= 65 ? "GO" : score >= 45 ? "OK" : score >= 25 ? "DBT" : "NO");
     u8g2.drawStr(100, y, go);          // FORECAST: go/no-go label, Y=y
   }
+}
+
+// ---------------------------------------------------------------------------
+// Screen 6: SYSTEM — uptime + data-fetch diagnostics
+// ---------------------------------------------------------------------------
+void screenSystem() {
+  drawHeader("SYSTEM");
+
+  u8g2.setFont(u8g2_font_5x7_tr);
+  char l[32];
+
+  // Uptime since boot (millis() — and so this — wraps every ~49.7 days)
+  uint32_t upSec = millis() / 1000;
+  uint32_t days  = upSec / 86400;
+  uint32_t hh    = (upSec % 86400) / 3600;
+  uint32_t mm    = (upSec % 3600) / 60;
+  uint32_t ss    = upSec % 60;
+  if (days > 0) {
+    snprintf(l, sizeof(l), "UP  %lud %02lu:%02lu:%02lu", days, hh, mm, ss);
+  } else {
+    snprintf(l, sizeof(l), "UP  %02lu:%02lu:%02lu", hh, mm, ss);
+  }
+  u8g2.drawStr(2, 20, l);               // SYSTEM: uptime since boot, Y=20
+
+  // Last successful data update, and how long ago
+  if (lastFetchEpoch == 0) {
+    snprintf(l, sizeof(l), "UPD  never");
+  } else {
+    struct tm lt;
+    localtime_r(&lastFetchEpoch, &lt);
+    char tbuf[10];
+    strftime(tbuf, sizeof(tbuf), "%H:%M:%S", &lt);
+    uint32_t ageMin = (uint32_t)(time(nullptr) - lastFetchEpoch) / 60;
+    if (ageMin < 60) {
+      snprintf(l, sizeof(l), "UPD  %s %lum ago", tbuf, ageMin);
+    } else {
+      snprintf(l, sizeof(l), "UPD  %s %luh%02lum ago", tbuf, ageMin / 60, ageMin % 60);
+    }
+  }
+  u8g2.drawStr(2, 32, l);               // SYSTEM: last successful fetch time + age, Y=32
+
+  // Countdown to the next scheduled fetch attempt
+  uint32_t interval = currentRetryIntervalMs();
+  uint32_t elapsed  = millis() - lastFetch;
+  uint32_t remainS  = (elapsed < interval) ? (interval - elapsed) / 1000 : 0;
+  snprintf(l, sizeof(l), "NEXT in %lum%02lus", remainS / 60, remainS % 60);
+  u8g2.drawStr(2, 44, l);               // SYSTEM: countdown to next fetch attempt, Y=44
+
+  // Result of the most recent fetch attempt
+  if (lastFetchOk) {
+    snprintf(l, sizeof(l), "STATUS  OK");
+  } else {
+    snprintf(l, sizeof(l), "STATUS  FAILED x%u", fetchAttempts);
+  }
+  u8g2.drawStr(2, 56, l);               // SYSTEM: last fetch attempt result, Y=56
 }
 
 // ---------------------------------------------------------------------------
@@ -960,16 +1027,30 @@ void loop() {
   // boot-time fetch), then back off to every 60 seconds — the on-screen
   // message switches at that point to suggest a power cycle if it's still
   // not resolving on its own.
-  uint32_t retryInterval;
-  if (dataValid) {
-    retryInterval = FETCH_INTERVAL_MS;
-  } else if (fetchAttempts < 10) {
-    retryInterval = 10000UL;
-  } else {
-    retryInterval = 60000UL;
-  }
+  uint32_t retryInterval = currentRetryIntervalMs();
   if (millis() - lastFetch >= retryInterval) {
     doFetchAstro();
+  }
+
+  // Safety net: if we've had good data before but fetches have been stuck
+  // failing for a long time, do a clean restart. ESP8266 HTTPS/TLS
+  // handshakes fragment the heap over many hours of uptime, which can make
+  // every subsequent fetch fail even though nothing else is actually wrong
+  // (this is what caused overnight runs to get stuck showing stale data
+  // with no visible indication) — a restart clears the fragmented heap and
+  // lets fetching recover on its own instead of requiring a manual power
+  // cycle.
+  if (dataValid && (time(nullptr) - lastFetchEpoch) > STALE_DATA_RESTART_SEC) {
+    Serial.println("[ASTRO] Data stale for too long — restarting to recover");
+    u8g2.clearBuffer();
+    u8g2.setFont(u8g2_font_6x12_tr);
+    u8g2.drawStr(4, 24, "DATA STUCK STALE");
+    u8g2.setFont(u8g2_font_5x7_tr);
+    u8g2.drawStr(4, 40, "Restarting to recover...");
+    u8g2.sendBuffer();
+    delay(1500);
+    ESP.restart();
+    // never reached
   }
 
   // Draw
@@ -980,6 +1061,7 @@ void loop() {
     case 2: screenSeeing();     break;  // Seeing + transparency
     case 3: screenConditions(); break;  // Wind, humidity, temp, precip
     case 4: screenForecast();   break;  // 24h table
+    case 5: screenSystem();    break;   // Uptime + fetch diagnostics
   }
   u8g2.sendBuffer();
 

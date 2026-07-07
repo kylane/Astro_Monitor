@@ -40,3 +40,10 @@
 #define SCREEN_DWELL_MS    10000            // milliseconds each screen is shown (default: 10s)
 #define FETCH_INTERVAL_MS  (30UL*60*1000)  // how often to re-fetch from 7timer (30 min)
 #define FETCH_RETRIES      3               // number of retries on malformed JSON
+
+// If we've had good data before but it's been this long since the last
+// successful fetch, restart automatically. ESP8266 HTTPS/TLS handshakes
+// fragment the heap over long uptimes, which can silently make every
+// subsequent fetch fail even though nothing else is wrong — a clean restart
+// clears it. See the SYSTEM screen for live fetch health.
+#define STALE_DATA_RESTART_SEC  (3UL*60*60)  // 3 hours
