@@ -238,16 +238,22 @@ int bestNightSlot() {
 // Fetch from 7timer — with retry for malformed JSON
 // ---------------------------------------------------------------------------
 bool fetchAstro() {
-  WiFiClientSecure client;
-  client.setInsecure();   // skip certificate validation — fine for public weather API
-  client.setTimeout(8000);  // bound the TCP/TLS socket itself — see fetchLocationName() note
+  // Plain HTTP, not HTTPS — 7timer serves this endpoint over HTTP directly (no
+  // redirect), and skipping TLS avoids BearSSL's heap-hungry session buffers,
+  // which were the real cause of the empty/truncated body reads seen over
+  // HTTPS (the Content-Length always came through fine; the encrypted body
+  // often didn't, especially on the ESP8266's limited heap).
+  WiFiClient client;
+  client.setTimeout(8000);  // bound the TCP socket itself
   HTTPClient http;
   http.setTimeout(8000);   // bound the HTTP-layer read too, so a stalled request always
                            // returns (and gets retried) instead of hanging forever
+  http.useHTTP10(true);    // avoid chunked transfer-encoding so getString() always has a
+                           // declared Content-Length to read against
 
   char url[160];
   snprintf(url, sizeof(url),
-    "https://www.7timer.info/bin/astro.php?lon=%.1f&lat=%.1f&ac=0&unit=metric&output=json&tzshift=0",
+    "http://www.7timer.info/bin/astro.php?lon=%.1f&lat=%.1f&ac=0&unit=metric&output=json&tzshift=0",
     homeLon, homeLat);
 
   Serial.printf("[ASTRO] Fetching: %s\n", url);
@@ -263,7 +269,15 @@ bool fetchAstro() {
     }
 
     String payload = http.getString();
+    int declaredLen = http.getSize();
     http.end();
+
+    if (payload.length() == 0) {
+      Serial.printf("[ASTRO] Empty body on attempt %d (Content-Length declared: %d)\n",
+                    attempt, declaredLen);
+      delay(2000);
+      continue;
+    }
 
     // ArduinoJson v7
     JsonDocument doc;
@@ -649,7 +663,7 @@ void screenConditions() {
 
   // Precipitation
   bool raining = strcmp(s.prectype, "none") != 0;
-  snprintf(l, sizeof(l), "PREC  %s", raining ? s.prectype : "NONE");
+  snprintf(l, sizeof(l), "RAIN  %s", raining ? s.prectype : "NONE");
   u8g2.drawStr(2, 58, l);             // CONDTNS: precipitation type, X=2 Y=58
 }
 

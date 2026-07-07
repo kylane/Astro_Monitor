@@ -292,9 +292,9 @@ If **UPD** keeps climbing (hours old) instead of resetting back near zero every 
 - 7Timer! data updates every ~6 hours on their server, so fetching more often than every 30 minutes won't give fresher data
 - The service occasionally returns malformed JSON — the built-in retry logic handles this automatically
 - Data covers 72 hours ahead in 3-hour slots
-- This project uses HTTP**S** to connect to 7timer with certificate verification disabled (acceptable for a public weather API with no sensitive data)
+- The 7timer forecast fetch uses plain HTTP, not HTTPS — their `astro.php` endpoint serves directly over HTTP with no redirect, and skipping TLS avoids BearSSL session buffers straining the ESP8266's limited heap (which was causing empty/truncated response bodies). The BigDataCloud geocoding lookup still uses HTTPS (with certificate verification disabled — acceptable for a public, no-signup API with no sensitive data).
 - If no forecast data has been fetched successfully yet, the device shows "Refreshing data" and retries every 10 seconds for the first 10 attempts, then backs off to retrying every 60 seconds with a "Retrying... try a power cycle if this persists" message. This is normal recovery behaviour after a fresh boot and usually resolves within a minute or two on its own.
-- If the device *has* successfully fetched data before but then goes 3+ hours without a successful refresh (e.g. from ESP8266 HTTPS/TLS heap fragmentation after long uptime), it now restarts itself automatically to clear the problem, rather than silently displaying the same stale forecast indefinitely. Check the **SYSTEM** screen any time to confirm data is actually current.
+- If the device *has* successfully fetched data before but then goes 3+ hours without a successful refresh, it now restarts itself automatically to clear the problem, rather than silently displaying the same stale forecast indefinitely. Check the **SYSTEM** screen any time to confirm data is actually current.
 - All on-screen forecast times (CLOUDS, FORECAST, TONITE's best window) are calculated from the last successful fetch time, not the live clock — so they stay accurate even if a refresh is overdue, instead of drifting forward with real time while showing stale data.
 
 ---
