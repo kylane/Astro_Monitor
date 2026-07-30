@@ -1,41 +1,55 @@
 // =============================================================================
 // Astro Sky Conditions Monitor
-// ESP8266 + 1.3" SH1106 I2C OLED
+// ESP32-C6 (Waveshare ESP32-C6-LCD-1.47) + 1.47" ST7789 SPI color TFT, 172x320
+// rotated to a 320x172 landscape framebuffer. Onboard WS2812 status LED
+// mirrors the TONITE screen's verdict color.
 //
 // Uses 7timer.info "astro" product (no API key needed, HTTP only)
 // Rotates through 6 screens showing astronomy-relevant conditions.
 //
 // Libraries (install from Arduino Library Manager):
-//   - U8g2        by olikraus
-//   - ArduinoJson by Benoit Blanchon (v7.x)
-//   - WiFiManager by tzapu
+//   - GFX Library for Arduino ("Arduino_GFX") by moononournation
+//   - U8g2         by olikraus     (used only for its bundled font data)
+//   - Adafruit NeoPixel by Adafruit (drives the onboard WS2812 status LED)
+//   - ArduinoJson  by Benoit Blanchon (v7.x)
+//   - WiFiManager  by tzapu
 //
-// Wiring (I2C):
-//   OLED GND -> GND
-//   OLED VCC -> 3V3
-//   OLED SCL -> GPIO5 (D1)
-//   OLED SDA -> GPIO4 (D2)
+// Wiring (SPI, write-only — no MISO):
+//   LCD GND  -> GND
+//   LCD VCC  -> 3V3
+//   LCD MOSI -> GPIO6
+//   LCD SCLK -> GPIO7
+//   LCD CS   -> GPIO14
+//   LCD DC   -> GPIO15
+//   LCD RST  -> GPIO21
+//   LCD BLK  -> GPIO22
+//   RGB LED  -> GPIO8 (onboard WS2812, single pixel)
+// (On the Waveshare ESP32-C6-LCD-1.47 dev board these are already wired
+//  on-board — no external wiring needed, this is for reference only.)
 //
 // WiFi / location setup:
 //   On first boot (or if WiFi can't connect), the device opens a setup
 //   portal AP called "AstroMonitor-Setup". Connect to it and a captive
 //   portal page lets you pick your WiFi network and enter latitude,
-//   longitude and POSIX timezone.
-//   To reopen the portal later (e.g. to change location or WiFi), press
-//   the board's FLASH button (GPIO0) at any time while it's running —
-//   release quickly to just open the portal, or hold 5+ seconds for a
-//   full factory reset (wipes WiFi + location/timezone, then restarts).
+//   longitude, POSIX timezone and your Bortle scale rating (light
+//   pollution, 1-9 — looked up manually, see runWifiSetup()).
+//   The board's BOOT button (GPIO9) is used at any time while it's running:
+//   single click jumps to the TONITE screen, double-click reopens this
+//   setup portal (e.g. to change location or WiFi), and holding 5+ seconds
+//   triggers a full factory reset (wipes WiFi + location/timezone, then
+//   restarts).
 // =============================================================================
 
 #include <Arduino.h>
-#include <ESP8266WiFi.h>
-#include <ESP8266HTTPClient.h>
+#include <WiFi.h>
+#include <HTTPClient.h>
 #include <WiFiClient.h>
 #include <WiFiClientSecure.h>
 #include <WiFiManager.h>
 #include <LittleFS.h>
 #include <U8g2lib.h>
-#include <Wire.h>
+#include <Arduino_GFX_Library.h>
+#include <Adafruit_NeoPixel.h>
 #include <ArduinoJson.h>
 #include <time.h>
 
@@ -46,10 +60,61 @@
 #include "config.h"
 
 // ---------------------------------------------------------------------------
-// Display
+// Display — ST7789, 172x320 native panel, rotated to a 320x172 landscape
+// framebuffer. Driven through Arduino_Canvas so each frame is composed in
+// RAM and pushed to the panel in one SPI burst (flush()), avoiding the
+// flicker a partial/direct-to-panel redraw would cause on a color TFT.
 // ---------------------------------------------------------------------------
-#define PIN_OLED_RST  16
-U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, PIN_OLED_RST);
+#define PIN_LCD_MOSI  6
+#define PIN_LCD_SCLK  7
+#define PIN_LCD_CS    14
+#define PIN_LCD_DC    15
+#define PIN_LCD_RST   21
+#define PIN_LCD_BL    22
+#define PIN_BOOT_BTN  9   // BOOT button — ESP32-C6's strapping pin, plays the
+                          // same role GPIO0 played on the ESP8266 (see the
+                          // GPIO0 caveat in the old wiring notes: same rule
+                          // applies here — don't hold it low across an actual
+                          // power-on/reset, only ever poll it from loop()).
+#define PIN_RGB_LED   8   // onboard WS2812 addressable RGB status LED
+
+#define LCD_ROTATION  1   // 1 = landscape, 320x172. If the display comes up
+                          // upside-down on your unit, change this to 3.
+#define DISP_W        320
+#define DISP_H        172
+
+Arduino_DataBus *bus = new Arduino_HWSPI(
+  PIN_LCD_DC, PIN_LCD_CS, PIN_LCD_SCLK, PIN_LCD_MOSI, GFX_NOT_DEFINED /* MISO unused, panel is write-only */);
+Arduino_GFX *tft = new Arduino_ST7789(
+  bus, PIN_LCD_RST, LCD_ROTATION, true /* IPS — this panel needs inversion on for correct (non-inverted) colors */,
+  172 /* native width */, 320 /* native height */,
+  34 /* col_offset1 */, 0 /* row_offset1 */, 34 /* col_offset2 */, 0 /* row_offset2 */);
+Arduino_Canvas *canvas = new Arduino_Canvas(DISP_W, DISP_H, tft);
+
+// Onboard status LED — mirrors the TONITE screen's verdict color (see
+// updateStatusLed(), called whenever a fetch completes) so you can tell
+// whether it's worth observing without needing the screen to be on TONITE.
+Adafruit_NeoPixel rgbLed(1, PIN_RGB_LED, NEO_RGB + NEO_KHZ800);  // this LED is wired R,G,B — NEO_GRB swapped red/green
+
+// Fonts — u8g2's bundled bitmap fonts, rendered directly by Arduino_GFX.
+// FONT_MD (also used for the header) is the smallest font used anywhere in
+// the UI — small/tiny tiers were tried and read as unreadable on real
+// hardware, so every screen is now laid out around this as the size floor.
+#define FONT_HDR  u8g2_font_9x18_tr        // header title + clock
+#define FONT_MD   u8g2_font_9x18_tr        // smallest size used anywhere — primary body text
+#define FONT_BOLD u8g2_font_helvB18_tr     // splash/status screens (SETUP MODE, WIFI FAILED, etc.)
+#define FONT_LG   u8g2_font_logisoso24_tr  // big digit call-outs (SEE/TRANSPCY rating)
+#define FONT_XL   u8g2_font_logisoso32_tr  // biggest — TONITE verdict
+
+// Color palette
+#define COL_BG      RGB565_BLACK
+#define COL_TEXT    RGB565_WHITE
+#define COL_DIM     RGB565_LIGHTGREY
+#define COL_HEADER  RGB565_CYAN
+#define COL_GOOD    RGB565_LIME
+#define COL_OK      RGB565_YELLOW
+#define COL_WARN    RGB565_ORANGE
+#define COL_BAD     RGB565_RED
 
 // ---------------------------------------------------------------------------
 // Data structures
@@ -85,12 +150,14 @@ uint8_t screen = 0;
 uint32_t lastScreenChange = 0;
 
 // ---------------------------------------------------------------------------
-// Runtime settings — lat/lon/timezone/location name/rotation time, editable
-// via the setup portal and persisted to LittleFS. WiFi credentials are
-// persisted separately by WiFiManager/the ESP8266 SDK itself.
+// Runtime settings — lat/lon/timezone/bortle/location name/rotation time,
+// editable via the setup portal and persisted to LittleFS. WiFi credentials
+// are persisted separately by WiFiManager/the ESP32 SDK itself.
 // ---------------------------------------------------------------------------
 float homeLat = HOME_LAT;
 float homeLon = HOME_LON;
+uint8_t homeBortle = HOME_BORTLE;   // 1 (darkest) - 9 (brightest); fixed site
+                                    // property, not weather — see config.h
 char  tzString[64];
 char  locationName[40] = "Location Unknown";
 uint32_t screenDwellMs = SCREEN_DWELL_MS;
@@ -99,7 +166,7 @@ void loadSettings() {
   strncpy(tzString, TIMEZONE, sizeof(tzString) - 1);
   tzString[sizeof(tzString) - 1] = '\0';
 
-  if (!LittleFS.begin()) {
+  if (!LittleFS.begin(true)) {  // true = format the partition if it's blank/corrupt
     Serial.println("[CFG] LittleFS mount failed, using defaults");
     return;
   }
@@ -117,22 +184,24 @@ void loadSettings() {
 
   homeLat = doc["lat"] | HOME_LAT;
   homeLon = doc["lon"] | HOME_LON;
+  homeBortle = doc["bortle"] | HOME_BORTLE;
   strncpy(tzString, doc["tz"] | TIMEZONE, sizeof(tzString) - 1);
   tzString[sizeof(tzString) - 1] = '\0';
   strncpy(locationName, doc["loc"] | "Location Unknown", sizeof(locationName) - 1);
   locationName[sizeof(locationName) - 1] = '\0';
   screenDwellMs = doc["dwell"] | SCREEN_DWELL_MS;
-  Serial.printf("[CFG] Loaded lat=%.5f lon=%.5f tz=%s loc=%s dwell=%lums\n",
-                homeLat, homeLon, tzString, locationName, screenDwellMs);
+  Serial.printf("[CFG] Loaded lat=%.5f lon=%.5f bortle=%u tz=%s loc=%s dwell=%lums\n",
+                homeLat, homeLon, homeBortle, tzString, locationName, screenDwellMs);
 }
 
-void saveSettings(float lat, float lon, const char* tz, const char* loc, uint32_t dwellMs) {
+void saveSettings(float lat, float lon, uint8_t bortle, const char* tz, const char* loc, uint32_t dwellMs) {
   JsonDocument doc;
-  doc["lat"]   = lat;
-  doc["lon"]   = lon;
-  doc["tz"]    = tz;
-  doc["loc"]   = loc;
-  doc["dwell"] = dwellMs;
+  doc["lat"]    = lat;
+  doc["lon"]    = lon;
+  doc["bortle"] = bortle;
+  doc["tz"]     = tz;
+  doc["loc"]    = loc;
+  doc["dwell"]  = dwellMs;
 
   File f = LittleFS.open("/settings.json", "w");
   if (!f) {
@@ -191,6 +260,26 @@ int windKmh(int spd) {
   return tbl[spd];
 }
 
+// 0-100 "goodness" percentage → a traffic-light tier: 0=good, 1=ok, 2=warn, 3=bad.
+// Shared by the screen colors (scoreColor()) and the onboard status LED
+// (updateStatusLed()) so the two can never drift out of sync with each other.
+int scoreTier(int pct) {
+  if (pct >= 65) return 0;
+  if (pct >= 45) return 1;
+  if (pct >= 25) return 2;
+  return 3;
+}
+
+uint16_t scoreColor(int pct) {
+  static const uint16_t tierColor[] = { COL_GOOD, COL_OK, COL_WARN, COL_BAD };
+  return tierColor[scoreTier(pct)];
+}
+
+// cloudcover 1-9 (1=best) and seeing/transparency 1-8 (8=best) as a 0-100
+// "goodness" percentage, so they can share scoreColor()'s traffic-light bands.
+int cloudPct(int c)  { return map(constrain(c, 1, 9), 1, 9, 100, 0); }
+int seeingPct(int s) { return map(constrain(s, 1, 8), 1, 8, 0, 100); }
+
 // ---------------------------------------------------------------------------
 // Go/no-go scoring — returns 0 (bad) to 100 (perfect)
 // ---------------------------------------------------------------------------
@@ -205,8 +294,32 @@ int calcScore(const AstroSlot& s) {
   int liScore = (s.liftedindex >= 0) ? 100 : map(constrain(s.liftedindex, -10, 0), -10, 0, 0, 100);
   // Precipitation — automatic 0 if raining
   if (strcmp(s.prectype, "none") != 0) return 0;
-  // Weighted average
+  // Weighted average — purely atmospheric/weather. Bortle rating is fixed
+  // per site and never changes night to night, so it's shown on TONITE for
+  // context only (see screenTonite()) rather than folded in here: baking a
+  // constant into this average wouldn't tell you anything new about tonight
+  // specifically, it would just apply the same flat offset to every night.
   return (cloudScore * 50 + seeingScore * 25 + transScore * 15 + liScore * 10) / 100;
+}
+
+// Sets the onboard WS2812 to tonight's current verdict color (same score,
+// same bands as the TONITE screen), or off if there's no data yet to score.
+// Called whenever fetch state changes (see doFetchAstro()) — the underlying
+// score only changes when new data arrives, so there's no need to redo this
+// every loop() iteration.
+void updateStatusLed() {
+  if (!dataValid || slotCount == 0) {
+    rgbLed.setPixelColor(0, 0);   // off — nothing to show a verdict for yet
+  } else {
+    static const uint32_t tierRgb[] = {
+      0x00FF00,  // good — green
+      0xFFFF00,  // ok — yellow
+      0xFF8C00,  // warn — orange
+      0xFF0000,  // bad — red
+    };
+    rgbLed.setPixelColor(0, tierRgb[scoreTier(calcScore(slots[0]))]);
+  }
+  rgbLed.show();
 }
 
 // Find the best nighttime slot (18:00–06:00 local) in next 24h
@@ -239,10 +352,8 @@ int bestNightSlot() {
 // ---------------------------------------------------------------------------
 bool fetchAstro() {
   // Plain HTTP, not HTTPS — 7timer serves this endpoint over HTTP directly (no
-  // redirect), and skipping TLS avoids BearSSL's heap-hungry session buffers,
-  // which were the real cause of the empty/truncated body reads seen over
-  // HTTPS (the Content-Length always came through fine; the encrypted body
-  // often didn't, especially on the ESP8266's limited heap).
+  // redirect), and there's no benefit paying the TLS handshake/session cost
+  // for a plaintext public API with no sensitive data.
   WiFiClient client;
   client.setTimeout(8000);  // bound the TCP socket itself
   HTTPClient http;
@@ -348,6 +459,7 @@ void doFetchAstro() {
     fetchAttempts++;
   }
   lastFetch = millis();
+  updateStatusLed();   // score (if any) just changed — refresh the verdict LED
 }
 
 // ---------------------------------------------------------------------------
@@ -410,30 +522,48 @@ bool fetchLocationName(float lat, float lon) {
 // Drawing helpers
 // ---------------------------------------------------------------------------
 
-void drawHeader(const char* title) {
-  u8g2.setFont(u8g2_font_5x7_tr);
-  char left[22];
-  snprintf(left, sizeof(left), "%s %d/%d", title, screen + 1, NUM_SCREENS);
-  u8g2.drawStr(2, 6, left);               // HEADER: title + screen index, X=2 Y=6
+void drawText(int x, int y, uint16_t color, const char* s) {
+  canvas->setTextColor(color);
+  canvas->setCursor(x, y);
+  canvas->print(s);
+}
 
-  // clock (right-aligned)
+int textWidth(const char* s) {
+  int16_t x1, y1;
+  uint16_t w, h;
+  canvas->getTextBounds(s, 0, 0, &x1, &y1, &w, &h);
+  return (int)w;
+}
+
+void drawRightAligned(int rightX, int y, uint16_t color, const char* s) {
+  drawText(rightX - textWidth(s), y, color, s);
+}
+
+void drawCentered(int centerX, int y, uint16_t color, const char* s) {
+  drawText(centerX - textWidth(s) / 2, y, color, s);
+}
+
+void drawHeader(const char* title) {
+  canvas->setFont(FONT_HDR);
+  char left[24];
+  snprintf(left, sizeof(left), "%s %d/%d", title, screen + 1, NUM_SCREENS);
+  drawText(4, 21, COL_HEADER, left);               // HEADER: title + screen index
+
   char t[10];
   time_t now = time(nullptr);
   struct tm lt;
   localtime_r(&now, &lt);
   strftime(t, sizeof(t), "%H:%M:%S", &lt);
-  u8g2.drawStr(127 - u8g2.getStrWidth(t), 6, t); // HEADER: clock right-aligned, Y=6
+  drawRightAligned(DISP_W - 4, 21, COL_TEXT, t);   // HEADER: clock right-aligned
 
-  u8g2.drawHLine(0, 8, 128);             // HEADER: divider line, Y=8
-  u8g2.drawVLine(0, 0, 3);              // HEADER: top-left corner tick
-  u8g2.drawVLine(125, 0, 3);            // HEADER: top-right corner tick
+  canvas->drawFastHLine(0, 28, DISP_W, COL_DIM);   // HEADER: divider line
 }
 
 // Small bar rating, width proportional to val/maxVal, at (x,y) w*h pixels
-void drawBar(int x, int y, int w, int h, int val, int maxVal) {
-  u8g2.drawFrame(x, y, w, h);
+void drawBar(int x, int y, int w, int h, int val, int maxVal, uint16_t color) {
+  canvas->drawRect(x, y, w, h, COL_TEXT);
   int fill = map(constrain(val, 0, maxVal), 0, maxVal, 0, w - 2);
-  if (fill > 0) u8g2.drawBox(x + 1, y + 1, fill, h - 2);
+  if (fill > 0) canvas->fillRect(x + 1, y + 1, fill, h - 2, color);
 }
 
 // Shown on any screen while dataValid is false. Message depends on how many
@@ -442,16 +572,13 @@ void drawBar(int x, int y, int w, int h, int val, int maxVal) {
 // guidance once that's expired and retries have backed off to every 60s.
 void drawNoDataMessage() {
   if (fetchAttempts < 10) {
-    u8g2.setFont(u8g2_font_6x12_tr);
-    u8g2.drawStr(4, 36, "Refreshing data");
+    canvas->setFont(FONT_BOLD);
+    drawCentered(DISP_W / 2, 96, COL_TEXT, "Refreshing data");
   } else {
-    u8g2.setFont(u8g2_font_5x7_tr);
-    const char* l1 = "Retrying...";
-    const char* l2 = "Try a power cycle";
-    const char* l3 = "if this persists";
-    u8g2.drawStr((128 - u8g2.getStrWidth(l1)) / 2, 28, l1);
-    u8g2.drawStr((128 - u8g2.getStrWidth(l2)) / 2, 40, l2);
-    u8g2.drawStr((128 - u8g2.getStrWidth(l3)) / 2, 50, l3);
+    canvas->setFont(FONT_MD);
+    drawCentered(DISP_W / 2, 84,  COL_TEXT, "Retrying...");
+    drawCentered(DISP_W / 2, 112, COL_DIM,  "Try a power cycle");
+    drawCentered(DISP_W / 2, 140, COL_DIM,  "if this persists");
   }
 }
 
@@ -464,24 +591,17 @@ const char* goNoGo(int score) {
   return "TERRIBLE";
 }
 
-const char* goNoGoSub(int score) {
-  if (score >= 85) return "Conditions are perfect";
-  if (score >= 65) return "Conditions are good";
-  if (score >= 45) return "Conditions are ok at best";
-  if (score >= 25) return "Conditions are not great";
-  return "Conditions are terrible";
-}
-
 // ---------------------------------------------------------------------------
 // Screen 1: TONITE — overall score + best window
 // ---------------------------------------------------------------------------
 void screenTonite() {
   drawHeader("TONITE");
 
-  // Location name, centred, right under the header divider
-  u8g2.setFont(u8g2_font_4x6_tr);
-  int lw = u8g2.getStrWidth(locationName);
-  u8g2.drawStr((128 - lw) / 2, 15, locationName); // TONITE: resolved place name, Y=15
+  // Location name + Bortle rating, centred, right under the header divider
+  canvas->setFont(FONT_MD);
+  char loc[48];
+  snprintf(loc, sizeof(loc), "%s (BORTLE %u)", locationName, homeBortle);
+  drawCentered(DISP_W / 2, 48, COL_DIM, loc);  // TONITE: resolved place name + Bortle rating
 
   if (!dataValid) {
     drawNoDataMessage();
@@ -491,45 +611,42 @@ void screenTonite() {
   // Score the next slot (closest to now) for current conditions
   int curScore = (slotCount > 0) ? calcScore(slots[0]) : 0;
   const char* verdict = goNoGo(curScore);
-  const char* sub     = goNoGoSub(curScore);
+  uint16_t vcol = scoreColor(curScore);
 
-  // Score bar near top
-  drawBar(4, 18, 120, 5, curScore, 100);       // TONITE: score bar 0-100, Y=18
+  // Score bar, with the raw percentage to its right
+  drawBar(10, 56, 240, 18, curScore, 100, vcol);            // TONITE: score bar 0-100
+  canvas->setFont(FONT_MD);
+  char pctStr[6];
+  snprintf(pctStr, sizeof(pctStr), "%d%%", curScore);
+  drawText(258, 71, vcol, pctStr);                          // TONITE: score bar percentage
 
-  // Big verdict below bar
-  u8g2.setFont(u8g2_font_7x14B_tr);
-  int vw = u8g2.getStrWidth(verdict);
-  u8g2.drawStr((128 - vw) / 2, 36, verdict);   // TONITE: verdict text large centred, Y=36
-
-  // Subtitle
-  u8g2.setFont(u8g2_font_5x7_tr);
-  int sw = u8g2.getStrWidth(sub);
-  u8g2.drawStr((128 - sw) / 2, 44, sub);        // TONITE: subtitle centred, Y=44
+  // Big verdict — the main event on this screen
+  canvas->setFont(FONT_XL);
+  drawCentered(DISP_W / 2, 116, vcol, verdict);              // TONITE: verdict text, large centred
 
   // Current slot details
   if (slotCount > 0) {
-    u8g2.setFont(u8g2_font_5x7_tr);
+    canvas->setFont(FONT_MD);
     char l[32];
     snprintf(l, sizeof(l), "CLD:%d  SEE:%d  TRN:%d",
              slots[0].cloudcover, slots[0].seeing, slots[0].transparency);
-    u8g2.drawStr(2, 52, l);              // TONITE: cloud/seeing/transparency ratings, Y=52
+    drawText(10, 138, COL_TEXT, l);              // TONITE: cloud/seeing/transparency ratings
   }
 
-  // Best tonight window
+  // Best tonight window — kept to one line at this font size by dropping
+  // the "WINDOW"/"SCR:" wording rather than shrinking the text.
   int best = bestNightSlot();
-  u8g2.setFont(u8g2_font_4x6_tr);
+  canvas->setFont(FONT_MD);
   if (best >= 0) {
     time_t slotTime = lastFetchEpoch + (slots[best].timepoint * 3600L);
     struct tm lt;
     localtime_r(&slotTime, &lt);
-    char l[32];
-    snprintf(l, sizeof(l), "BEST WINDOW: %02d:00  SCR:%d",
-             lt.tm_hour, calcScore(slots[best]));
-    u8g2.drawStr(2, 58, l);             // TONITE: best imaging window time + score, Y=58
-    snprintf(l, sizeof(l), "%s", cloudText(slots[best].cloudcover));
-    u8g2.drawStr(2, 63, l);             // TONITE: cloud description at best window, Y=63
+    char l[40];
+    snprintf(l, sizeof(l), "BEST %02d:00 %d%% %s",
+             lt.tm_hour, calcScore(slots[best]), cloudText(slots[best].cloudcover));
+    drawText(10, 162, COL_TEXT, l);              // TONITE: best imaging window time/score/cloud desc
   } else {
-    u8g2.drawStr(2, 58, "No good window tonight"); // TONITE: no good window message, Y=58
+    drawText(10, 162, COL_DIM, "No good window tonight");
   }
 }
 
@@ -544,39 +661,47 @@ void screenClouds() {
     return;
   }
 
-  // Show up to 6 timepoints as vertical bar chart
-  const uint8_t BARS = min((int)slotCount, 6);
-  const int barW    = 16;
-  const int barMaxH = 32;
-  const int barY    = 44;              // moved down 6px from header
-  const int startX  = 2;
-  const int axisX   = startX + BARS * (barW + 1) + 2; // 1px gap after last bar
+  // Show up to 6 timepoints as vertical bar chart. Bars are shorter than
+  // they used to be (barMaxH/barBotY) specifically to leave enough room
+  // below for two full-size (FONT_MD) label lines per bar instead of the
+  // old tiny sub-labels.
+  const uint8_t BARS    = min((int)slotCount, 6);
+  const int     barW    = 34;
+  const int     gap     = 6;
+  const int     barMaxH = 70;
+  const int     barBotY = 122;             // bottom of the bars
+  const int     startX  = 14;
+  const int     axisX   = startX + BARS * (barW + gap);
 
   for (uint8_t i = 0; i < BARS; i++) {
-    int x = startX + i * (barW + 1);
-    int barH = map(slots[i].cloudcover, 1, 9, 2, barMaxH);
-    u8g2.drawFrame(x, barY - barMaxH, barW, barMaxH); // CLOUDS: bar outline
-    u8g2.drawBox(x + 1, barY - barH + 1, barW - 2, barH - 2); // CLOUDS: cloud fill
+    int x = startX + i * (barW + gap);
+    int c = slots[i].cloudcover;
+    int barH = map(c, 1, 9, 6, barMaxH);
+    uint16_t col = scoreColor(cloudPct(c));
+
+    canvas->drawRect(x, barBotY - barMaxH, barW, barMaxH, COL_DIM);          // CLOUDS: bar outline
+    canvas->fillRect(x + 1, barBotY - barH + 1, barW - 2, barH - 2, col);    // CLOUDS: cloud fill
+
     // Hour label
-    u8g2.setFont(u8g2_font_5x7_tr);
     time_t slotTime = lastFetchEpoch + (slots[i].timepoint * 3600L);
     struct tm lt;
     localtime_r(&slotTime, &lt);
     char h[6];
     snprintf(h, sizeof(h), "%02dh", lt.tm_hour);
-    u8g2.drawStr(x + 1, barY + 10, h);   // CLOUDS: hour label, Y=barY+10
+    canvas->setFont(FONT_MD);
+    drawCentered(x + barW / 2, barBotY + 20, COL_TEXT, h);   // CLOUDS: hour label
+
     // Cloud cover rating
     char cld[6];
-    snprintf(cld, sizeof(cld), "%d/9", slots[i].cloudcover);
-    u8g2.setFont(u8g2_font_4x6_tr);
-    u8g2.drawStr(x + 2, barY + 19, cld); // CLOUDS: cloud cover "N/9", Y=barY+19
+    snprintf(cld, sizeof(cld), "%d/9", c);
+    drawCentered(x + barW / 2, barBotY + 42, COL_DIM, cld);  // CLOUDS: cloud cover "N/9"
   }
 
-  // Y-axis: 1px gap after last bar, 1px gap before labels
-  u8g2.setFont(u8g2_font_4x6_tr);
-  u8g2.drawVLine(axisX, barY - barMaxH, barMaxH);              // CLOUDS: Y-axis line
-  u8g2.drawStr(axisX + 2, barY - barMaxH + 5, "OVC"); // CLOUDS: top label, 1px gap from line
-  u8g2.drawStr(axisX + 2, barY,               "CLR"); // CLOUDS: bottom label, 1px gap from line
+  // Y-axis
+  canvas->drawFastVLine(axisX, barBotY - barMaxH, barMaxH, COL_DIM);   // CLOUDS: Y-axis line
+  canvas->setFont(FONT_MD);
+  drawText(axisX + 6, barBotY - barMaxH + 16, COL_BAD,  "OVC");  // CLOUDS: top label
+  drawText(axisX + 6, barBotY,                COL_GOOD, "CLR");  // CLOUDS: bottom label
 }
 
 // ---------------------------------------------------------------------------
@@ -590,46 +715,48 @@ void screenSeeing() {
     return;
   }
 
-  // Current slot — big seeing rating
-  u8g2.setFont(u8g2_font_5x7_tr);
-  u8g2.drawStr(2, 24, "SEE");            // SEEING: row label, X=2 Y=24
-  u8g2.setFont(u8g2_font_7x14B_tr);
+  AstroSlot& s = slots[0];
+
+  // Seeing — label+description on the left, big rating digit on the right
+  canvas->setFont(FONT_MD);
+  char row[24];
+  snprintf(row, sizeof(row), "SEE  %s", seeingText(s.seeing));
+  drawText(10, 64, COL_TEXT, row);                          // SEEING: label + description
+  uint16_t seeCol = scoreColor(seeingPct(s.seeing));
+  canvas->setFont(FONT_LG);
   char sv[3];
-  snprintf(sv, sizeof(sv), "%d", slots[0].seeing);
-  u8g2.drawStr(46, 24, sv);              // SEEING: current seeing value large, X=46 Y=24
-  u8g2.setFont(u8g2_font_5x7_tr);
-  u8g2.drawStr(55, 24, "/8");            // SEEING: out-of-8 label, X=55 Y=24
-  u8g2.drawStr(69, 24, seeingText(slots[0].seeing)); // SEEING: seeing text, X=69 Y=24
+  snprintf(sv, sizeof(sv), "%d", s.seeing);
+  drawText(240, 70, seeCol, sv);                            // SEEING: current seeing value, large
 
   // Transparency
-  u8g2.setFont(u8g2_font_5x7_tr);
-  u8g2.drawStr(2, 38, "TRANSPCY");       // SEEING: row label, X=2 Y=38
-  u8g2.setFont(u8g2_font_7x14B_tr);
+  canvas->setFont(FONT_MD);
+  snprintf(row, sizeof(row), "TRANSPCY  %s", transText(s.transparency));
+  drawText(10, 106, COL_TEXT, row);                         // SEEING: label + description
+  uint16_t transCol = scoreColor(seeingPct(s.transparency));
+  canvas->setFont(FONT_LG);
   char tv[3];
-  snprintf(tv, sizeof(tv), "%d", slots[0].transparency);
-  u8g2.drawStr(46, 38, tv);              // SEEING: current transparency value large, X=46 Y=38
-  u8g2.setFont(u8g2_font_5x7_tr);
-  u8g2.drawStr(55, 38, "/8");            // SEEING: out-of-8 label, X=55 Y=38
-  u8g2.drawStr(69, 38, transText(slots[0].transparency)); // SEEING: transparency text, X=69 Y=38
+  snprintf(tv, sizeof(tv), "%d", s.transparency);
+  drawText(240, 112, transCol, tv);                         // SEEING: current transparency value, large
 
-  // Lifted index
-  u8g2.setFont(u8g2_font_5x7_tr);
-  char li[16];
-  snprintf(li, sizeof(li), "STABILITY: %+d", slots[0].liftedindex);
-  u8g2.drawStr(2, 50, li);             // SEEING: lifted index (stability), X=2 Y=50
-  const char* stab = (slots[0].liftedindex >= 2)  ? "STABLE" :
-                     (slots[0].liftedindex >= -2)  ? "NEUTRAL" : "UNSTABLE";
-  u8g2.drawStr(80, 50, stab);          // SEEING: stability label, X=80 Y=50
+  // Lifted index — dynamically positioned since the numeric part's width varies
+  canvas->setFont(FONT_MD);
+  char li[20];
+  snprintf(li, sizeof(li), "STABILITY: %+d", s.liftedindex);
+  drawText(10, 144, COL_TEXT, li);                          // SEEING: lifted index (stability)
+  const char* stab = (s.liftedindex >= 2)  ? "STABLE" :
+                     (s.liftedindex >= -2)  ? "NEUTRAL" : "UNSTABLE";
+  uint16_t stabCol = (s.liftedindex >= 2) ? COL_GOOD : (s.liftedindex >= -2) ? COL_OK : COL_BAD;
+  drawText(10 + textWidth(li) + 20, 144, stabCol, stab);    // SEEING: stability label
 
   // Mini seeing trend for next slots
-  u8g2.setFont(u8g2_font_4x6_tr);
-  u8g2.drawStr(2, 62, "TREND:");        // SEEING: trend label, X=2 Y=62
-  int tx = 30;
+  canvas->setFont(FONT_MD);
+  drawText(10, 166, COL_DIM, "TREND:");                     // SEEING: trend label
+  int tx = 80;
   for (uint8_t i = 0; i < min((int)slotCount, 5); i++) {
-    char s[3];
-    snprintf(s, sizeof(s), "%d", slots[i].seeing);
-    u8g2.drawStr(tx, 62, s);            // SEEING: seeing trend values, Y=62
-    tx += 18;
+    char sVal[3];
+    snprintf(sVal, sizeof(sVal), "%d", slots[i].seeing);
+    drawText(tx, 166, scoreColor(seeingPct(slots[i].seeing)), sVal);  // SEEING: seeing trend values
+    tx += 46;
   }
 }
 
@@ -645,26 +772,26 @@ void screenConditions() {
   }
 
   AstroSlot& s = slots[0];
-
-  u8g2.setFont(u8g2_font_6x12_tr);
+  canvas->setFont(FONT_MD);
+  char l[32];
 
   // Temperature
-  char l[32];
   snprintf(l, sizeof(l), "TEMP  %d\xB0" "C", s.temp2m);
-  u8g2.drawStr(2, 22, l);              // CONDTNS: temperature, X=2 Y=22
+  drawText(10, 57, COL_TEXT, l);              // CONDTNS: temperature
 
   // Wind
   snprintf(l, sizeof(l), "WIND  %s %dkm/h", s.winddir, windKmh(s.windspd));
-  u8g2.drawStr(2, 34, l);             // CONDTNS: wind direction + speed, X=2 Y=34
+  drawText(10, 91, COL_TEXT, l);              // CONDTNS: wind direction + speed
 
-  // Humidity
+  // Humidity — highlighted if high enough to risk dew forming on optics
+  bool dewRisk = s.rh2m >= 85;
   snprintf(l, sizeof(l), "HUM   %d%%", s.rh2m);
-  u8g2.drawStr(2, 46, l);             // CONDTNS: relative humidity, X=2 Y=46
+  drawText(10, 125, dewRisk ? COL_WARN : COL_TEXT, l);   // CONDTNS: relative humidity
 
   // Precipitation
   bool raining = strcmp(s.prectype, "none") != 0;
   snprintf(l, sizeof(l), "RAIN  %s", raining ? s.prectype : "NONE");
-  u8g2.drawStr(2, 58, l);             // CONDTNS: precipitation type, X=2 Y=58
+  drawText(10, 159, raining ? COL_BAD : COL_TEXT, l);    // CONDTNS: precipitation type
 }
 
 // ---------------------------------------------------------------------------
@@ -678,20 +805,19 @@ void screenForecast() {
     return;
   }
 
-  // 3 rows at 5x7 font for readability
   const uint8_t ROWS = min((int)slotCount, 3);
-  u8g2.setFont(u8g2_font_5x7_tr);
+  canvas->setFont(FONT_MD);
 
   // Column headers
-  u8g2.drawStr(2,  16, "TIME");        // FORECAST: column header - time, Y=16
-  u8g2.drawStr(38, 16, "CLD");         // FORECAST: column header - cloud, Y=16
-  u8g2.drawStr(58, 16, "SEE");         // FORECAST: column header - seeing, Y=16
-  u8g2.drawStr(78, 16, "TRN");         // FORECAST: column header - transparency, Y=16
-  u8g2.drawStr(100,16, "GO?");         // FORECAST: column header - go/no-go, Y=16
-  u8g2.drawHLine(0, 18, 128);          // FORECAST: header divider, Y=18
+  drawText(10,  48, COL_DIM, "TIME");         // FORECAST: column header - time
+  drawText(130, 48, COL_DIM, "CLD");          // FORECAST: column header - cloud
+  drawText(180, 48, COL_DIM, "SEE");          // FORECAST: column header - seeing
+  drawText(230, 48, COL_DIM, "TRN");          // FORECAST: column header - transparency
+  drawText(270, 48, COL_DIM, "GO?");          // FORECAST: column header - go/no-go
+  canvas->drawFastHLine(0, 54, DISP_W, COL_DIM); // FORECAST: header divider
 
   for (uint8_t i = 0; i < ROWS; i++) {
-    int y = 30 + i * 13;               // 13px row spacing for 5x7 font
+    int y = 78 + i * 32;                      // 32px row spacing
 
     time_t slotTime = lastFetchEpoch + (slots[i].timepoint * 3600L);
     struct tm lt;
@@ -699,21 +825,22 @@ void screenForecast() {
 
     char row[8];
     snprintf(row, sizeof(row), "%02d:00", lt.tm_hour);
-    u8g2.drawStr(2,  y, row);          // FORECAST: slot time, Y=y
+    drawText(10, y, COL_TEXT, row);            // FORECAST: slot time
 
     snprintf(row, sizeof(row), "%d", slots[i].cloudcover);
-    u8g2.drawStr(42, y, row);          // FORECAST: cloud cover value, Y=y
+    drawText(135, y, COL_TEXT, row);           // FORECAST: cloud cover value
 
     snprintf(row, sizeof(row), "%d", slots[i].seeing);
-    u8g2.drawStr(62, y, row);          // FORECAST: seeing value, Y=y
+    drawText(185, y, COL_TEXT, row);           // FORECAST: seeing value
 
     snprintf(row, sizeof(row), "%d", slots[i].transparency);
-    u8g2.drawStr(82, y, row);          // FORECAST: transparency value, Y=y
+    drawText(235, y, COL_TEXT, row);           // FORECAST: transparency value
 
     int score = calcScore(slots[i]);
     bool raining = strcmp(slots[i].prectype, "none") != 0;
     const char* go = raining ? "RAIN" : (score >= 85 ? "GO!" : score >= 65 ? "GO" : score >= 45 ? "OK" : score >= 25 ? "DBT" : "NO");
-    u8g2.drawStr(100, y, go);          // FORECAST: go/no-go label, Y=y
+    uint16_t goCol = raining ? COL_BAD : scoreColor(score);
+    drawText(270, y, goCol, go);                // FORECAST: go/no-go label
   }
 }
 
@@ -723,8 +850,8 @@ void screenForecast() {
 void screenSystem() {
   drawHeader("SYSTEM");
 
-  u8g2.setFont(u8g2_font_5x7_tr);
-  char l[32];
+  canvas->setFont(FONT_MD);
+  char l[40];
 
   // Uptime since boot (millis() — and so this — wraps every ~49.7 days)
   uint32_t upSec = millis() / 1000;
@@ -737,7 +864,7 @@ void screenSystem() {
   } else {
     snprintf(l, sizeof(l), "UP  %02lu:%02lu:%02lu", hh, mm, ss);
   }
-  u8g2.drawStr(2, 20, l);               // SYSTEM: uptime since boot, Y=20
+  drawText(10, 57, COL_TEXT, l);                // SYSTEM: uptime since boot
 
   // Last successful data update, and how long ago
   if (lastFetchEpoch == 0) {
@@ -754,35 +881,35 @@ void screenSystem() {
       snprintf(l, sizeof(l), "UPD  %s %luh%02lum ago", tbuf, ageMin / 60, ageMin % 60);
     }
   }
-  u8g2.drawStr(2, 32, l);               // SYSTEM: last successful fetch time + age, Y=32
+  drawText(10, 91, COL_TEXT, l);                 // SYSTEM: last successful fetch time + age
 
   // Countdown to the next scheduled fetch attempt
   uint32_t interval = currentRetryIntervalMs();
   uint32_t elapsed  = millis() - lastFetch;
   uint32_t remainS  = (elapsed < interval) ? (interval - elapsed) / 1000 : 0;
   snprintf(l, sizeof(l), "NEXT in %lum%02lus", remainS / 60, remainS % 60);
-  u8g2.drawStr(2, 44, l);               // SYSTEM: countdown to next fetch attempt, Y=44
+  drawText(10, 125, COL_TEXT, l);                // SYSTEM: countdown to next fetch attempt
 
   // Result of the most recent fetch attempt
   if (lastFetchOk) {
-    snprintf(l, sizeof(l), "STATUS  OK");
+    drawText(10, 159, COL_GOOD, "STATUS  OK");   // SYSTEM: last fetch attempt result
   } else {
     snprintf(l, sizeof(l), "STATUS  FAILED x%u", fetchAttempts);
+    drawText(10, 159, COL_BAD, l);
   }
-  u8g2.drawStr(2, 56, l);               // SYSTEM: last fetch attempt result, Y=56
 }
 
 // ---------------------------------------------------------------------------
 // WiFi/location setup portal. Runs at boot (forcePortal=false: only opens if
 // there's no saved WiFi or it can't connect) or on demand from loop() when
-// the FLASH button is pressed (forcePortal=true: always opens).
+// the BOOT button is pressed (forcePortal=true: always opens).
 //
-// GPIO0 must NOT be held low across an actual power-on/reset — the ESP8266's
+// GPIO9 must NOT be held low across an actual power-on/reset — the ESP32-C6's
 // boot ROM samples it at that exact moment and, if low, enters the UART
-// flash/download bootloader instead of running this sketch at all (which is
-// why the display used to stay completely blank when holding the button
-// while powering up). So the button is only ever read here, well after
-// boot has already completed normally, via loop()'s continuous polling.
+// flash/download bootloader instead of running this sketch at all (the same
+// reason the ESP8266 build required this for GPIO0). So the button is only
+// ever read here, well after boot has already completed normally, via
+// loop()'s continuous polling.
 //
 // If the user saves new settings, we show a confirmation and reboot the
 // device ourselves (ESP.restart()) rather than asking them to power cycle —
@@ -791,16 +918,17 @@ void screenSystem() {
 //
 // If the submitted WiFi credentials fail to connect, WiFiManager's default
 // behaviour is to silently keep retrying inside the same blocking call with
-// no visible feedback on our OLED — setBreakAfterConfig(true) makes it
+// no visible feedback on our screen — setBreakAfterConfig(true) makes it
 // return to us after any submission (success or failure) instead, so we can
 // show a clear "couldn't connect, reopening" message and let the user try
 // again immediately rather than staring at a frozen "SETUP MODE" screen.
 // ---------------------------------------------------------------------------
 bool runWifiSetup(bool forcePortal) {
-  char latStr[16], lonStr[16], dwellStr[8];
+  char latStr[16], lonStr[16], dwellStr[8], bortleStr[4];
   snprintf(latStr, sizeof(latStr), "%.5f", homeLat);
   snprintf(lonStr, sizeof(lonStr), "%.5f", homeLon);
   snprintf(dwellStr, sizeof(dwellStr), "%lu", (unsigned long)(screenDwellMs / 1000));
+  snprintf(bortleStr, sizeof(bortleStr), "%u", homeBortle);
 
   WiFiManagerParameter html_latlon_link(
     "<p style='margin:8px 0 2px'>Find your <b>latitude/longitude</b> at "
@@ -815,6 +943,13 @@ bool runWifiSetup(bool forcePortal) {
     "<small>(this link may not load once you're connected to this WiFi — if so, "
     "look it up beforehand, write it down, and come back to enter it below)</small></p>");
   WiFiManagerParameter custom_tz("tz", "POSIX Timezone", tzString, sizeof(tzString) - 1);
+  WiFiManagerParameter html_bortle_link(
+    "<p style='margin:8px 0 2px'>Find your <b>Bortle scale rating</b> (1=darkest sky, 9=brightest/"
+    "most light-polluted) at <a href='https://www.lightpollutionmap.net' target='_blank'>lightpollutionmap.net</a> "
+    "— click your location on the map.<br>"
+    "<small>(this link may not load once you're connected to this WiFi — if so, "
+    "look it up beforehand, write it down, and come back to enter it below)</small></p>");
+  WiFiManagerParameter custom_bortle("bortle", "Bortle scale (1-9)", bortleStr, sizeof(bortleStr) - 1);
   WiFiManagerParameter custom_dwell("dwell", "Screen rotation time (seconds)", dwellStr, sizeof(dwellStr) - 1);
 
   bool settingsSaved = false;
@@ -824,17 +959,25 @@ bool runWifiSetup(bool forcePortal) {
   wm.addParameter(&custom_lon);
   wm.addParameter(&html_tz_link);
   wm.addParameter(&custom_tz);
+  wm.addParameter(&html_bortle_link);
+  wm.addParameter(&custom_bortle);
   wm.addParameter(&custom_dwell);
+  // Dark theme for the captive portal web page (not the LCD). WiFiManager's
+  // own setDarkMode(true)/"invert" class only recolors the body/links/h1 and
+  // leaves the form and button containers white — a full-page CSS filter
+  // invert (the technique the library's own README recommends) covers
+  // everything instead.
+  wm.setCustomHeadElement("<style>html{filter: invert(100%); -webkit-filter: invert(100%);}</style>");
   wm.setSaveConfigCallback([&settingsSaved]() { settingsSaved = true; });
   wm.setAPCallback([](WiFiManager*) {
-    u8g2.clearBuffer();
-    u8g2.setFont(u8g2_font_6x12_tr);
-    u8g2.drawStr(4, 16, "SETUP MODE");
-    u8g2.setFont(u8g2_font_5x7_tr);
-    u8g2.drawStr(4, 32, "Join WiFi:");
-    u8g2.drawStr(4, 42, "AstroMonitor-Setup");
-    u8g2.drawStr(4, 56, "Then open 192.168.4.1");
-    u8g2.sendBuffer();
+    canvas->fillScreen(COL_BG);
+    canvas->setFont(FONT_BOLD);
+    drawCentered(DISP_W / 2, 40, COL_HEADER, "SETUP MODE");
+    canvas->setFont(FONT_MD);
+    drawCentered(DISP_W / 2, 76,  COL_TEXT, "Join WiFi:");
+    drawCentered(DISP_W / 2, 104, COL_TEXT, "AstroMonitor-Setup");
+    drawCentered(DISP_W / 2, 138, COL_DIM,  "Then open 192.168.4.1");
+    canvas->flush();
   });
   wm.setConfigPortalTimeout(300);     // give up and continue after 5 min
   wm.setBreakAfterConfig(true);       // return to us even if the connect attempt fails
@@ -854,14 +997,14 @@ bool runWifiSetup(bool forcePortal) {
     // Submitted, but the new WiFi credentials didn't connect — say so and
     // reopen the portal for another attempt instead of silently retrying.
     Serial.println("[CFG] WiFi connect failed after portal submit — reopening setup");
-    u8g2.clearBuffer();
-    u8g2.setFont(u8g2_font_6x12_tr);
-    u8g2.drawStr(4, 18, "WIFI FAILED");
-    u8g2.setFont(u8g2_font_5x7_tr);
-    u8g2.drawStr(4, 34, "Could not connect to");
-    u8g2.drawStr(4, 44, "that network.");
-    u8g2.drawStr(4, 56, "Reopening setup...");
-    u8g2.sendBuffer();
+    canvas->fillScreen(COL_BG);
+    canvas->setFont(FONT_BOLD);
+    drawCentered(DISP_W / 2, 40, COL_BAD, "WIFI FAILED");
+    canvas->setFont(FONT_MD);
+    drawCentered(DISP_W / 2, 76,  COL_TEXT, "Could not connect to");
+    drawCentered(DISP_W / 2, 104, COL_TEXT, "that network.");
+    drawCentered(DISP_W / 2, 138, COL_DIM,  "Reopening setup...");
+    canvas->flush();
     delay(3000);
     forcePortal = true;   // make sure the retry reopens the portal
   }
@@ -872,6 +1015,11 @@ bool runWifiSetup(bool forcePortal) {
     strncpy(tzString, custom_tz.getValue(), sizeof(tzString) - 1);
     tzString[sizeof(tzString) - 1] = '\0';
 
+    long bortleVal = atol(custom_bortle.getValue());
+    if (bortleVal < 1) bortleVal = 1;
+    if (bortleVal > 9) bortleVal = 9;
+    homeBortle = (uint8_t)bortleVal;
+
     long dwellSec = atol(custom_dwell.getValue());
     if (dwellSec < 2) dwellSec = 2;       // keep rotation sane at either extreme
     if (dwellSec > 120) dwellSec = 120;
@@ -880,15 +1028,15 @@ bool runWifiSetup(bool forcePortal) {
     // Location changed — old resolved name no longer applies until re-geocoded
     strncpy(locationName, "Location Unknown", sizeof(locationName) - 1);
     locationName[sizeof(locationName) - 1] = '\0';
-    saveSettings(homeLat, homeLon, tzString, locationName, screenDwellMs);
+    saveSettings(homeLat, homeLon, homeBortle, tzString, locationName, screenDwellMs);
 
-    u8g2.clearBuffer();
-    u8g2.setFont(u8g2_font_6x12_tr);
-    u8g2.drawStr(4, 24, "SETTINGS SAVED");
-    u8g2.setFont(u8g2_font_5x7_tr);
-    u8g2.drawStr(4, 40, "Restarting to apply");
-    u8g2.drawStr(4, 50, "new settings...");
-    u8g2.sendBuffer();
+    canvas->fillScreen(COL_BG);
+    canvas->setFont(FONT_BOLD);
+    drawCentered(DISP_W / 2, 48, COL_GOOD, "SETTINGS SAVED");
+    canvas->setFont(FONT_MD);
+    drawCentered(DISP_W / 2, 88,  COL_TEXT, "Restarting to apply");
+    drawCentered(DISP_W / 2, 116, COL_TEXT, "new settings...");
+    canvas->flush();
     Serial.println("[CFG] Settings saved — restarting");
     delay(2500);
     ESP.restart();
@@ -912,25 +1060,40 @@ void setup() {
   Serial.begin(115200);
   Serial.println("\n[ASTRO] Booting...");
 
-  u8g2.begin();
-  u8g2.clearBuffer();
-  u8g2.setFont(u8g2_font_6x12_tr);
-  u8g2.drawStr(4, 20, "ASTRO MONITOR");
-  u8g2.drawStr(4, 36, "Connecting WiFi");
-  u8g2.sendBuffer();
+  if (!canvas->begin()) {
+    Serial.println("[LCD] canvas->begin() failed!");
+  }
+  ledcAttach(PIN_LCD_BL, 5000, 8);
+  ledcWrite(PIN_LCD_BL, 128);   // ~50% duty — Waveshare's guidance is to keep
+                                // this panel's backlight at 50% or lower to
+                                // avoid heat buildup behind the screen
+
+  rgbLed.begin();
+  rgbLed.setBrightness(30);   // dim ambient glow, not a flashlight — raise if
+                              // you want it more visible from across the room
+  rgbLed.show();              // starts off; updateStatusLed() lights it once
+                               // the first fetch completes (see doFetchAstro())
+
+  canvas->fillScreen(COL_BG);
+  canvas->setFont(FONT_BOLD);
+  drawCentered(DISP_W / 2, 68, COL_HEADER, "ASTRO MONITOR");
+  canvas->setFont(FONT_MD);
+  drawCentered(DISP_W / 2, 104, COL_TEXT, "Connecting WiFi");
+  canvas->flush();
 
   loadSettings();
 
-  // FLASH button (GPIO0) is only ever polled from loop() — see the note on
+  // BOOT button (GPIO9) is only ever polled from loop() — see the note on
   // runWifiSetup() for why it must not be read/held during boot itself.
-  pinMode(0, INPUT_PULLUP);
+  pinMode(PIN_BOOT_BTN, INPUT_PULLUP);
 
   bool connected = runWifiSetup(false);
 
   if (!connected) {
-    u8g2.clearBuffer();
-    u8g2.drawStr(4, 30, "WIFI FAILED");
-    u8g2.sendBuffer();
+    canvas->fillScreen(COL_BG);
+    canvas->setFont(FONT_BOLD);
+    drawCentered(DISP_W / 2, 92, COL_BAD, "WIFI FAILED");
+    canvas->flush();
     Serial.println("\n[ASTRO] WiFi failed");
     while (true) delay(1000);
   }
@@ -959,15 +1122,16 @@ void setup() {
   }
   Serial.println(" done");
 
-  u8g2.clearBuffer();
-  u8g2.drawStr(4, 20, "ASTRO MONITOR");
-  u8g2.drawStr(4, 36, "Fetching data...");
-  u8g2.sendBuffer();
+  canvas->fillScreen(COL_BG);
+  canvas->setFont(FONT_BOLD);
+  drawCentered(DISP_W / 2, 68, COL_HEADER, "ASTRO MONITOR");
+  canvas->setFont(FONT_MD);
+  drawCentered(DISP_W / 2, 104, COL_TEXT, "Fetching data...");
+  canvas->flush();
 
-  // Weather fetch runs before the (non-essential) geocode lookup below —
-  // back-to-back HTTPS/TLS requests right after boot can strain the
-  // ESP8266's limited RAM, and the forecast is the actual point of this
-  // device, so it gets first crack at a clean memory state.
+  // Weather fetch runs before the (non-essential) geocode lookup below, so
+  // the actual point of this device gets first crack at a clean network
+  // state right after boot.
   doFetchAstro();
   lastScreenChange = millis();
 
@@ -977,7 +1141,7 @@ void setup() {
   if (strcmp(locationName, "Location Unknown") == 0) {
     Serial.println("[GEO] Resolving location name...");
     if (fetchLocationName(homeLat, homeLon)) {
-      saveSettings(homeLat, homeLon, tzString, locationName, screenDwellMs);
+      saveSettings(homeLat, homeLon, homeBortle, tzString, locationName, screenDwellMs);
     } else {
       Serial.println("[GEO] Lookup failed, using \"Location Unknown\"");
     }
@@ -988,33 +1152,34 @@ void setup() {
 // Loop
 // ---------------------------------------------------------------------------
 void loop() {
-  // FLASH button (GPIO0): press any time to open the setup portal (release
-  // quickly), or keep holding 5+ seconds for a factory reset that wipes the
-  // saved WiFi credentials and settings.json, then restarts into a blank
-  // portal. See runWifiSetup() for why this is only ever checked here, in
-  // loop(), rather than at boot.
-  if (digitalRead(0) == LOW) {
-    u8g2.clearBuffer();
-    u8g2.setFont(u8g2_font_5x7_tr);
-    u8g2.drawStr(4, 16, "Button held");
-    u8g2.drawStr(4, 30, "Release now: SETUP");
-    u8g2.drawStr(4, 42, "Keep holding 5s for:");
-    u8g2.drawStr(4, 52, "FACTORY RESET");
-    u8g2.sendBuffer();
+  // BOOT button (GPIO9) gestures:
+  //   single click  -> jump straight to the TONITE screen
+  //   double click  -> open the setup portal
+  //   hold 5+ sec   -> factory reset (wipes WiFi credentials + settings.json)
+  // See runWifiSetup() for why this is only ever checked here, in loop(),
+  // rather than at boot.
+  if (digitalRead(PIN_BOOT_BTN) == LOW) {
+    canvas->fillScreen(COL_BG);
+    canvas->setFont(FONT_MD);
+    drawCentered(DISP_W / 2, 42, COL_TEXT, "Button held");
+    drawCentered(DISP_W / 2, 78,  COL_TEXT, "Release: TONITE");
+    drawCentered(DISP_W / 2, 108, COL_TEXT, "Double-click: SETUP");
+    drawCentered(DISP_W / 2, 138, COL_WARN, "Hold 5s: FACTORY RESET");
+    canvas->flush();
 
     uint32_t holdStart = millis();
-    while (digitalRead(0) == LOW && millis() - holdStart < 5000) {
+    while (digitalRead(PIN_BOOT_BTN) == LOW && millis() - holdStart < 5000) {
       delay(50);
     }
 
     if (millis() - holdStart >= 5000) {
       Serial.println("[CFG] Factory reset requested — erasing WiFi + settings");
-      u8g2.clearBuffer();
-      u8g2.setFont(u8g2_font_6x12_tr);
-      u8g2.drawStr(4, 28, "FACTORY RESET");
-      u8g2.setFont(u8g2_font_5x7_tr);
-      u8g2.drawStr(4, 44, "Erasing + restarting");
-      u8g2.sendBuffer();
+      canvas->fillScreen(COL_BG);
+      canvas->setFont(FONT_BOLD);
+      drawCentered(DISP_W / 2, 68, COL_BAD, "FACTORY RESET");
+      canvas->setFont(FONT_MD);
+      drawCentered(DISP_W / 2, 104, COL_TEXT, "Erasing + restarting");
+      canvas->flush();
 
       WiFiManager wm;
       wm.resetSettings();                // erase saved WiFi credentials
@@ -1023,10 +1188,36 @@ void loop() {
       ESP.restart();
       // never reached
     } else {
-      // Short press — open the portal now. If the user saves, runWifiSetup()
-      // restarts the device itself and never returns. If they back out or it
-      // times out, we just fall through and resume normal operation below.
-      runWifiSetup(true);
+      // Released before 5s — this is either a single click or the first half
+      // of a double-click. Give it a short window to see if a second press
+      // follows before committing to the single-click action; this is the
+      // unavoidable cost of telling the two gestures apart on one button.
+      const uint32_t DOUBLE_CLICK_WINDOW_MS = 400;
+      uint32_t releaseTime = millis();
+      bool secondPress = false;
+      while (millis() - releaseTime < DOUBLE_CLICK_WINDOW_MS) {
+        if (digitalRead(PIN_BOOT_BTN) == LOW) {
+          secondPress = true;
+          break;
+        }
+        delay(10);
+      }
+
+      if (secondPress) {
+        // Debounce: wait out the second press's release so the outer loop()
+        // doesn't immediately see it as low and re-trigger this whole block.
+        while (digitalRead(PIN_BOOT_BTN) == LOW) delay(10);
+        // Double-click — open the portal now. If the user saves,
+        // runWifiSetup() restarts the device itself and never returns. If
+        // they back out or it times out, we just fall through and resume
+        // normal operation below.
+        runWifiSetup(true);
+      } else {
+        // Single click — jump straight to TONITE and restart the rotation
+        // timer fresh from here.
+        screen = 0;
+        lastScreenChange = millis();
+      }
     }
   }
 
@@ -1047,28 +1238,23 @@ void loop() {
   }
 
   // Safety net: if we've had good data before but fetches have been stuck
-  // failing for a long time, do a clean restart. ESP8266 HTTPS/TLS
-  // handshakes fragment the heap over many hours of uptime, which can make
-  // every subsequent fetch fail even though nothing else is actually wrong
-  // (this is what caused overnight runs to get stuck showing stale data
-  // with no visible indication) — a restart clears the fragmented heap and
-  // lets fetching recover on its own instead of requiring a manual power
-  // cycle.
+  // failing for a long time, do a clean restart rather than silently
+  // displaying the same stale forecast indefinitely.
   if (dataValid && (time(nullptr) - lastFetchEpoch) > STALE_DATA_RESTART_SEC) {
     Serial.println("[ASTRO] Data stale for too long — restarting to recover");
-    u8g2.clearBuffer();
-    u8g2.setFont(u8g2_font_6x12_tr);
-    u8g2.drawStr(4, 24, "DATA STUCK STALE");
-    u8g2.setFont(u8g2_font_5x7_tr);
-    u8g2.drawStr(4, 40, "Restarting to recover...");
-    u8g2.sendBuffer();
+    canvas->fillScreen(COL_BG);
+    canvas->setFont(FONT_BOLD);
+    drawCentered(DISP_W / 2, 68, COL_BAD, "DATA STUCK STALE");
+    canvas->setFont(FONT_MD);
+    drawCentered(DISP_W / 2, 104, COL_TEXT, "Restarting to recover...");
+    canvas->flush();
     delay(1500);
     ESP.restart();
     // never reached
   }
 
   // Draw
-  u8g2.clearBuffer();
+  canvas->fillScreen(COL_BG);
   switch (screen) {
     case 0: screenTonite();     break;  // Overall go/no-go + best window
     case 1: screenClouds();     break;  // Cloud cover bar chart
@@ -1077,7 +1263,7 @@ void loop() {
     case 4: screenForecast();   break;  // 24h table
     case 5: screenSystem();    break;   // Uptime + fetch diagnostics
   }
-  u8g2.sendBuffer();
+  canvas->flush();
 
   delay(100);
 }
