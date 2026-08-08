@@ -118,7 +118,7 @@ After connecting, the device automatically looks up a human-readable place name 
 
 ## Onboard status LED
 
-The board's single WS2812 RGB LED mirrors the TONITE screen's verdict — green/yellow/orange/red on the same score bands (65/45/25) — so you can tell whether tonight's worth setting up without needing the screen rotation to land on TONITE. It stays off until the first successful (or failed) fetch resolves a score, and only updates when new data arrives, not continuously. Brightness defaults to a dim ambient glow (`rgbLed.setBrightness(30)` in `setup()`) — raise it in `astro_monitor.ino` if you want it more visible from across the room.
+The board's single WS2812 RGB LED mirrors the TONITE screen's verdict — green/yellow/orange/red on the same score bands (65/45/25) — so you can tell whether tonight's worth setting up without needing the screen rotation to land on TONITE. It stays off until the first successful (or failed) fetch resolves a score, and only updates when new data arrives, not continuously. Brightness defaults to full (`rgbLed.setBrightness(255)` in `setup()`, matching the factory demo) — lower it in `astro_monitor.ino` if you want a dimmer ambient glow instead.
 
 ---
 
@@ -130,18 +130,19 @@ The device rotates through 6 screens on a 320×172 color display. Ratings and ve
 
 ### Screen 1 — TONITE
 
-**Overall go/no-go assessment for right now.**
+**Overall go/no-go assessment for tonight's dark hours.**
 
 ```
 TONITE 1/5                 21:04:33
-     Brisbane (BORTLE 5)
-██████████████░░░░░░░░░░  72%     ← score bar + raw percentage (colored by score)
-        GOOD ENOUGH               ← colored by score
-CLD:5  SEE:6  TRN:4
-BEST 23:00 82% FEW CLOUDS
+ 72%  Brisbane (BORTLE 5)
+ ┌──┐ GOOD ENOUGH             ← colored by score
+ │▓▓│ Clear early, dips around 23:00
+ │▓▓│ for 3h, then clearing again
+ │▓▓│ BEST 21:00 82% FEW CLOUDS
+ └──┘
 ```
 
-**Score bar** — fills left to right from 0 to 100, colored by how good the score is, with the raw percentage shown to its right. The fuller (and greener) it is, the better the conditions.
+**Score gauge** — a vertical bar down the left edge that fills bottom-up from 0 to 100, colored by how good the score is, with the raw percentage above it. The fuller (and greener) it is, the better the conditions. It's vertical rather than a full-width horizontal bar so the verdict/trend column keeps as much width as possible — the verdict is the one thing on this screen that most needs to stay big.
 
 **Verdict** is one of five ratings:
 
@@ -153,7 +154,9 @@ BEST 23:00 82% FEW CLOUDS
 | DOUBTFUL | 25–44 | Poor conditions, probably not worth it |
 | TERRIBLE | 0–24 | Bad conditions, stay inside |
 
-**Score calculation** — weighted average of four purely atmospheric factors:
+**Score calculation** — the score and verdict are the *average* of the weighted score below across every forecast slot inside tonight's real dark-hours window (sunset today → sunrise tomorrow, computed from your lat/lon — see below), not just the nearest forecast slot. A single bad hour barely moves the average; a problem that shows up and stays (e.g. clouds rolling in after a clear sunset) correctly drags it down.
+
+Each slot's own weighted score comes from four purely atmospheric factors:
 
 | Factor | Weight | How it's scored |
 |--------|--------|----------------|
@@ -165,7 +168,21 @@ BEST 23:00 82% FEW CLOUDS
 
 Your **Bortle scale rating is shown for context but deliberately isn't part of this score.** It's a fixed site property that never changes night to night, so folding it into a moving average wouldn't tell you anything new about tonight specifically — it would just apply the same flat offset to every single night, forever. The score instead answers "how good is tonight's weather," full stop; Bortle is there as a reminder of what your site can realistically achieve (e.g. faint deep-sky targets are always tougher at a high Bortle number, regardless of how clear tonight is).
 
-**BEST WINDOW** shows the highest-scoring 3-hour slot between 20:00 and 05:00 tonight, with its score and cloud description.
+**Trend phrase** narrates how conditions change across the night, since one average can't tell "great all night" apart from "great early, ruined after midnight." It's given two full lines so it reads as a real sentence rather than a clipped fragment. Each slot is rated clear (≥65) or poor, and the sequence collapses to one of:
+
+| Pattern | Example phrase |
+|---------|----------------|
+| Clear the whole window | `Clear for the duration` |
+| Poor the whole window | `Poor all night` |
+| Clear, then degrades and stays bad | `Clear until 23:00, / degrading after that` |
+| Poor, then clears and stays good | `Poor until 02:00, / clearing after that` |
+| Clear → short dip → clear again | `Clear, dips around 23:00 / for 3h, then clears again` |
+| Poor → short clear window → poor again | `Poor, clears around 23:00 / for 3h, then poor again` |
+| More transitions than that | `Variable overnight` |
+
+**BEST WINDOW** shows the highest-scoring 3-hour slot inside tonight's real dark-hours window, with its score and cloud description.
+
+**Dark-hours window** is computed from your saved lat/lon using the standard sunrise/sunset equation (civil twilight, i.e. sun ~0.83° below the horizon) — not a fixed 20:00–05:00 guess — so it tracks the actual season (e.g. much earlier sunsets in winter). If you're checking the device between midnight and dawn, "tonight" still correctly means the window that opened at *yesterday's* sunset, not tonight's upcoming one.
 
 ---
 
@@ -240,13 +257,15 @@ TREND: 6  6  5  4  4
 
 ```
 CONDTNS 4/5               21:04:33
-TEMP  12°C
+DUSK 17:45   DAWN 05:45
+TEMP  12°C (8-12° tonight)
 WIND  NE 7km/h
 HUM   65%
 PREC  NONE
 ```
 
-- **TEMP** — air temperature at 2m height (°C)
+- **DUSK/DAWN** — tonight's real sunset and sunrise times, computed from your saved lat/lon (same calculation the TONITE screen's dark-hours window uses). Deliberately not labeled RISE/SET — RISE conventionally means sunrise, so an evening time under a "RISE" label would read backwards.
+- **TEMP** — air temperature at 2m height (°C), with tonight's overnight low–high range shown alongside the current reading
 - **WIND** — direction and approximate speed. High wind causes vibration in mounts and can shake the telescope during long exposures
 - **HUM** — relative humidity %. Shown in orange when ≥85%, since high humidity risks dew forming on optics and mirrors
 - **PREC** — precipitation type: NONE, rain, snow, etc. (shown in red if raining)

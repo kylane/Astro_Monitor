@@ -52,6 +52,7 @@
 #include <Adafruit_NeoPixel.h>
 #include <ArduinoJson.h>
 #include <time.h>
+#include <math.h>   // sin/cos/atan/acos/fmod — sunrise/sunset calc (see calcSunEvent())
 
 // ---------------------------------------------------------------------------
 // Config — edit config.h for default location/timezone and display timing.
@@ -133,6 +134,16 @@ struct AstroSlot {
   int  temp2m;        // temperature °C
   char prectype[8];   // "none", "rain", "snow", etc.
 };
+
+// Tonight's real sunset->sunrise window (see computeTonightWindow()) — and
+// one run of consecutive clear/poor slots within it (see
+// buildNightSegments()). Declared here rather than next to the functions
+// that use them: the Arduino IDE hoists auto-generated function prototypes
+// to the top of the file, above any type defined later, so a struct used in
+// a function signature has to be declared this early or the hoisted
+// prototype fails to compile.
+struct NightWindow { time_t start; time_t end; };
+struct NightSegment { bool clear; time_t start; };
 
 const uint8_t MAX_SLOTS = 16;   // up to 48 hours ahead
 AstroSlot slots[MAX_SLOTS];
@@ -302,11 +313,231 @@ int calcScore(const AstroSlot& s) {
   return (cloudScore * 50 + seeingScore * 25 + transScore * 15 + liScore * 10) / 100;
 }
 
-// Sets the onboard WS2812 to tonight's current verdict color (same score,
-// same bands as the TONITE screen), or off if there's no data yet to score.
-// Called whenever fetch state changes (see doFetchAstro()) — the underlying
-// score only changes when new data arrives, so there's no need to redo this
-// every loop() iteration.
+// A slot counts as "clear" for trend/threshold purposes at the same cutoff
+// goNoGo() uses for GOOD ENOUGH — below this it's rated "poor".
+const int CLEAR_SCORE_CUTOFF = 65;
+
+// ---------------------------------------------------------------------------
+// Sunrise/sunset — the real dark-hours window for tonight, used below to
+// decide which forecast slots actually belong to "tonight" rather than a
+// fixed 20:00-05:00 guess. Standard Sunrise/Sunset equation (public domain,
+// see https://edwilliams.org/sunrise_sunset_algorithm.htm); zenith 90.833
+// accounts for atmospheric refraction and the sun's apparent radius (civil
+// sunrise/sunset, matches what you'd call "dark" by eye).
+// ---------------------------------------------------------------------------
+
+// Days since 1970-01-01 for a proleptic-Gregorian UTC calendar date (Howard
+// Hinnant's days_from_civil) — used instead of timegm(), which isn't
+// guaranteed available on the ESP32 toolchain.
+static long daysFromCivil(int y, int m, int d) {
+  y -= (m <= 2) ? 1 : 0;
+  long era = (y >= 0 ? y : y - 399) / 400;
+  unsigned yoe = (unsigned)(y - era * 400);
+  unsigned doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+  unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+  return era * 146097L + (long)doe - 719468L;
+}
+
+// Computes sunrise or sunset (UTC epoch) for a given calendar date/location.
+// Returns false if the sun doesn't rise/set that day (polar latitudes only —
+// won't happen at any latitude this device is realistically deployed at, but
+// cheap to guard against a NaN propagating into the score).
+bool calcSunEvent(float lat, float lon, int year, int month, int day, bool sunrise, time_t& outEpoch) {
+  const double zenith = 90.833;
+  const double deg2rad = PI / 180.0;
+  const double rad2deg = 180.0 / PI;
+
+  int N1 = (275 * month) / 9;
+  int N2 = (month + 9) / 12;
+  int N3 = (1 + (year - 4 * (year / 4) + 2) / 3);
+  int N = N1 - (N2 * N3) + day - 30;
+
+  double lngHour = lon / 15.0;
+  double t = sunrise ? (N + ((6 - lngHour) / 24)) : (N + ((18 - lngHour) / 24));
+
+  double M = (0.9856 * t) - 3.289;
+
+  double L = M + (1.916 * sin(M * deg2rad)) + (0.020 * sin(2 * M * deg2rad)) + 282.634;
+  L = fmod(L + 360.0, 360.0);
+
+  double RA = rad2deg * atan(0.91764 * tan(L * deg2rad));
+  RA = fmod(RA + 360.0, 360.0);
+  double Lquadrant  = floor(L / 90) * 90;
+  double RAquadrant = floor(RA / 90) * 90;
+  RA = (RA + (Lquadrant - RAquadrant)) / 15.0;
+
+  double sinDec = 0.39782 * sin(L * deg2rad);
+  double cosDec = cos(asin(sinDec));
+
+  double cosH = (cos(zenith * deg2rad) - (sinDec * sin(lat * deg2rad))) / (cosDec * cos(lat * deg2rad));
+  if (cosH > 1.0 || cosH < -1.0) return false;
+
+  double H = sunrise ? (360.0 - rad2deg * acos(cosH)) : (rad2deg * acos(cosH));
+  H = H / 15.0;
+
+  double T = H + RA - (0.06571 * t) - 6.622;
+  double UT = fmod(T - lngHour + 24.0, 24.0);
+
+  outEpoch = (time_t)(daysFromCivil(year, month, day) * 86400L + (long)(UT * 3600.0));
+  return true;
+}
+
+// Tonight's real sunset->sunrise window. If it's currently after midnight
+// but before dawn, "tonight" is still the tail of the window that opened at
+// yesterday's sunset — not a window starting at today's (upcoming) sunset.
+bool computeTonightWindow(NightWindow& nw) {
+  time_t now = time(nullptr);
+  struct tm lt;
+  localtime_r(&now, &lt);
+
+  time_t sunriseToday, sunsetToday;
+  if (!calcSunEvent(homeLat, homeLon, lt.tm_year + 1900, lt.tm_mon + 1, lt.tm_mday, true,  sunriseToday)) return false;
+  if (!calcSunEvent(homeLat, homeLon, lt.tm_year + 1900, lt.tm_mon + 1, lt.tm_mday, false, sunsetToday))  return false;
+
+  if (now < sunriseToday) {
+    time_t yesterday = now - 86400L;
+    struct tm ylt;
+    localtime_r(&yesterday, &ylt);
+    time_t sunsetYesterday;
+    if (!calcSunEvent(homeLat, homeLon, ylt.tm_year + 1900, ylt.tm_mon + 1, ylt.tm_mday, false, sunsetYesterday)) return false;
+    nw.start = sunsetYesterday;
+    nw.end   = sunriseToday;
+  } else {
+    time_t tomorrow = now + 86400L;
+    struct tm tlt;
+    localtime_r(&tomorrow, &tlt);
+    time_t sunriseTomorrow;
+    if (!calcSunEvent(homeLat, homeLon, tlt.tm_year + 1900, tlt.tm_mon + 1, tlt.tm_mday, true, sunriseTomorrow)) return false;
+    nw.start = sunsetToday;
+    nw.end   = sunriseTomorrow;
+  }
+  return true;
+}
+
+bool slotInWindow(uint8_t i, const NightWindow& nw) {
+  time_t st = lastFetchEpoch + (slots[i].timepoint * 3600L);
+  return st >= nw.start && st < nw.end;
+}
+
+// Average score across tonight's real sunset->sunrise window — this is what
+// TONITE's headline score/verdict represents, not just the nearest forecast
+// slot. A single bad hour barely moves it; a sustained bad stretch (e.g.
+// clouds rolling in after a clear sunset and staying) correctly drags it
+// down. Returns -1 if the window can't be computed or no slots fall in it
+// (e.g. stale/short forecast data) — callers fall back to the nearest slot.
+int tonightAverageScore() {
+  if (!dataValid || slotCount == 0) return -1;
+  NightWindow nw;
+  if (!computeTonightWindow(nw)) return -1;
+  int sum = 0, count = 0;
+  for (uint8_t i = 0; i < slotCount; i++) {
+    if (!slotInWindow(i, nw)) continue;
+    sum += calcScore(slots[i]);
+    count++;
+  }
+  return (count > 0) ? (sum / count) : -1;
+}
+
+// Min/max temperature across tonight's window — used by CONDTNS to show an
+// overnight range alongside the current reading. Returns false (lo/hi left
+// unset) if no slots fall in the window.
+bool nightTempRange(const NightWindow& nw, int& lo, int& hi) {
+  bool any = false;
+  for (uint8_t i = 0; i < slotCount; i++) {
+    if (!slotInWindow(i, nw)) continue;
+    int t = slots[i].temp2m;
+    if (!any || t < lo) lo = t;
+    if (!any || t > hi) hi = t;
+    any = true;
+  }
+  return any;
+}
+
+// Run-length-encodes tonight's slots into at most maxSegs clear/poor
+// segments. Stops growing past maxSegs rather than erroring — a night
+// choppier than that just reads as "Variable overnight" (see
+// tonightTrendPhrase()), so extra segments wouldn't be shown anyway.
+int buildNightSegments(const NightWindow& nw, NightSegment* segs, int maxSegs) {
+  int n = 0;
+  bool haveCur = false, curClear = false;
+  for (uint8_t i = 0; i < slotCount; i++) {
+    if (!slotInWindow(i, nw)) continue;
+    bool clear = calcScore(slots[i]) >= CLEAR_SCORE_CUTOFF;
+    if (!haveCur || clear != curClear) {
+      if (n >= maxSegs) break;
+      segs[n].clear = clear;
+      segs[n].start = lastFetchEpoch + (slots[i].timepoint * 3600L);
+      n++;
+      curClear = clear;
+      haveCur = true;
+    }
+  }
+  return n;
+}
+
+// Narrates how conditions change across tonight's window — a single average
+// score can't distinguish "great all night" from "great early, ruined after
+// midnight", so this describes the shape instead, across two lines so it can
+// read as a full sentence rather than a clipped fragment. Patterns beyond a
+// single dip/recovery collapse to a generic "Variable overnight" rather than
+// trying to spell out every transition on a small screen.
+void tonightTrendPhrase(char* line1, size_t l1size, char* line2, size_t l2size) {
+  line2[0] = '\0';
+  NightWindow nw;
+  if (!dataValid || slotCount == 0 || !computeTonightWindow(nw)) {
+    snprintf(line1, l1size, "No data for tonight");
+    return;
+  }
+  NightSegment segs[4];
+  int n = buildNightSegments(nw, segs, 4);
+  if (n <= 0) {
+    snprintf(line1, l1size, "No data for tonight");
+    return;
+  }
+
+  struct tm lt;
+  char t1[6], t2[6];
+  switch (n) {
+    case 1:
+      snprintf(line1, l1size, "%s", segs[0].clear ? "Clear for the duration" : "Poor all night");
+      break;
+    case 2:
+      localtime_r(&segs[1].start, &lt);
+      snprintf(t1, sizeof(t1), "%02d:%02d", lt.tm_hour, lt.tm_min);
+      if (segs[0].clear) {
+        snprintf(line1, l1size, "Clear until %s,", t1);
+        snprintf(line2, l2size, "degrading after that");
+      } else {
+        snprintf(line1, l1size, "Poor until %s,", t1);
+        snprintf(line2, l2size, "clearing after that");
+      }
+      break;
+    case 3: {
+      localtime_r(&segs[1].start, &lt);
+      snprintf(t1, sizeof(t1), "%02d:%02d", lt.tm_hour, lt.tm_min);
+      localtime_r(&segs[2].start, &lt);
+      snprintf(t2, sizeof(t2), "%02d:%02d", lt.tm_hour, lt.tm_min);
+      int dipHours = (int)((segs[2].start - segs[1].start) / 3600L);
+      if (segs[0].clear) {
+        snprintf(line1, l1size, "Clear, dips around %s", t1);
+        snprintf(line2, l2size, "for %dh, then clears again", dipHours);
+      } else {
+        snprintf(line1, l1size, "Poor, clears around %s", t1);
+        snprintf(line2, l2size, "for %dh, then poor again", dipHours);
+      }
+      break;
+    }
+    default:
+      snprintf(line1, l1size, "Variable overnight");
+      break;
+  }
+}
+
+// Sets the onboard WS2812 to tonight's verdict color (same score, same bands
+// as the TONITE screen), or off if there's no data yet to score. Called
+// whenever fetch state changes (see doFetchAstro()) — the underlying score
+// only changes when new data arrives, so there's no need to redo this every
+// loop() iteration.
 void updateStatusLed() {
   if (!dataValid || slotCount == 0) {
     rgbLed.setPixelColor(0, 0);   // off — nothing to show a verdict for yet
@@ -317,27 +548,24 @@ void updateStatusLed() {
       0xFF8C00,  // warn — orange
       0xFF0000,  // bad — red
     };
-    rgbLed.setPixelColor(0, tierRgb[scoreTier(calcScore(slots[0]))]);
+    int score = tonightAverageScore();
+    if (score < 0) score = calcScore(slots[0]);   // fallback: window unavailable (e.g. clock not synced yet)
+    rgbLed.setPixelColor(0, tierRgb[scoreTier(score)]);
   }
   rgbLed.show();
 }
 
-// Find the best nighttime slot (18:00–06:00 local) in next 24h
-// Returns index into slots[], or -1 if none
+// Best-scoring slot within tonight's real sunset->sunrise window.
+// Returns index into slots[], or -1 if none (window unavailable, or no
+// slots fall inside it).
 int bestNightSlot() {
   if (!dataValid || slotCount == 0) return -1;
+  NightWindow nw;
+  if (!computeTonightWindow(nw)) return -1;
   int bestIdx = -1;
   int bestScore = -1;
-  // Anchor to the last successful fetch, not the live clock — timepoint is
-  // hours-from-fetch, so using time(nullptr) here would drift the mapping
-  // between slot and clock-hour further off the longer data goes stale.
   for (uint8_t i = 0; i < slotCount; i++) {
-    time_t slotTime = lastFetchEpoch + (slots[i].timepoint * 3600L);
-    struct tm lt;
-    localtime_r(&slotTime, &lt);
-    int h = lt.tm_hour;
-    bool isNight = (h >= 20 || h < 5);   // 8pm–5am
-    if (!isNight) continue;
+    if (!slotInWindow(i, nw)) continue;
     int score = calcScore(slots[i]);
     if (score > bestScore) {
       bestScore = score;
@@ -566,6 +794,14 @@ void drawBar(int x, int y, int w, int h, int val, int maxVal, uint16_t color) {
   if (fill > 0) canvas->fillRect(x + 1, y + 1, fill, h - 2, color);
 }
 
+// Vertical variant of drawBar() — fills bottom-up instead of left-to-right,
+// used by the TONITE screen's side gauge (see screenTonite()).
+void drawBarVertical(int x, int y, int w, int h, int val, int maxVal, uint16_t color) {
+  canvas->drawRect(x, y, w, h, COL_TEXT);
+  int fill = map(constrain(val, 0, maxVal), 0, maxVal, 0, h - 2);
+  if (fill > 0) canvas->fillRect(x + 1, y + h - 1 - fill, w - 2, fill, color);
+}
+
 // Shown on any screen while dataValid is false. Message depends on how many
 // fetch attempts have happened since the last success: a brief note while
 // still in the fast-retry window (every 10s, up to 10 tries), then longer
@@ -597,46 +833,53 @@ const char* goNoGo(int score) {
 void screenTonite() {
   drawHeader("TONITE");
 
-  // Location name + Bortle rating, centred, right under the header divider
+  // Location name + Bortle rating, top of the right-hand column
   canvas->setFont(FONT_MD);
   char loc[48];
   snprintf(loc, sizeof(loc), "%s (BORTLE %u)", locationName, homeBortle);
-  drawCentered(DISP_W / 2, 48, COL_DIM, loc);  // TONITE: resolved place name + Bortle rating
+  drawText(70, 62, COL_DIM, loc);  // TONITE: resolved place name + Bortle rating, level with gauge top
 
   if (!dataValid) {
     drawNoDataMessage();
     return;
   }
 
-  // Score the next slot (closest to now) for current conditions
-  int curScore = (slotCount > 0) ? calcScore(slots[0]) : 0;
+  // Headline score/verdict = average across tonight's real sunset->sunrise
+  // window (see tonightAverageScore()), not just the nearest forecast slot —
+  // falls back to the nearest slot only if the window itself is unavailable
+  // (e.g. clock not synced yet).
+  int curScore = tonightAverageScore();
+  if (curScore < 0) curScore = (slotCount > 0) ? calcScore(slots[0]) : 0;
   const char* verdict = goNoGo(curScore);
   uint16_t vcol = scoreColor(curScore);
 
-  // Score bar, with the raw percentage to its right
-  drawBar(10, 56, 240, 18, curScore, 100, vcol);            // TONITE: score bar 0-100
+  // Score gauge — vertical, down the left edge, so the verdict/trend column
+  // keeps as much width as possible (the verdict is the one thing on this
+  // screen that most needs to stay big).
   canvas->setFont(FONT_MD);
   char pctStr[6];
   snprintf(pctStr, sizeof(pctStr), "%d%%", curScore);
-  drawText(258, 71, vcol, pctStr);                          // TONITE: score bar percentage
+  drawCentered(32, 48, vcol, pctStr);                       // TONITE: score percentage, above the gauge
+  drawBarVertical(10, 56, 44, 110, curScore, 100, vcol);     // TONITE: score gauge 0-100, fills bottom-up
 
-  // Big verdict — the main event on this screen
-  canvas->setFont(FONT_XL);
-  drawCentered(DISP_W / 2, 116, vcol, verdict);              // TONITE: verdict text, large centred
+  // Big verdict — FONT_LG rather than FONT_XL: the gauge now takes the left
+  // edge, so "GOOD ENOUGH" (the widest verdict) needs to fit the narrower
+  // right-hand column rather than the full screen width.
+  canvas->setFont(FONT_LG);
+  drawText(70, 96, vcol, verdict);                          // TONITE: verdict text, large
 
-  // Current slot details
-  if (slotCount > 0) {
-    canvas->setFont(FONT_MD);
-    char l[32];
-    snprintf(l, sizeof(l), "CLD:%d  SEE:%d  TRN:%d",
-             slots[0].cloudcover, slots[0].seeing, slots[0].transparency);
-    drawText(10, 138, COL_TEXT, l);              // TONITE: cloud/seeing/transparency ratings
-  }
-
-  // Best tonight window — kept to one line at this font size by dropping
-  // the "WINDOW"/"SCR:" wording rather than shrinking the text.
-  int best = bestNightSlot();
+  // Trend — how conditions are expected to change through the night, since
+  // the headline score alone can't distinguish "great all night" from
+  // "great early, ruined after midnight" (see tonightTrendPhrase()). Two
+  // lines, so it reads as a full sentence rather than a clipped fragment.
   canvas->setFont(FONT_MD);
+  char trend1[40], trend2[40];
+  tonightTrendPhrase(trend1, sizeof(trend1), trend2, sizeof(trend2));
+  drawText(70, 122, COL_TEXT, trend1);                      // TONITE: overnight trend phrase, line 1
+  if (trend2[0]) drawText(70, 140, COL_TEXT, trend2);       // TONITE: overnight trend phrase, line 2
+
+  // Best tonight window
+  int best = bestNightSlot();
   if (best >= 0) {
     time_t slotTime = lastFetchEpoch + (slots[best].timepoint * 3600L);
     struct tm lt;
@@ -644,9 +887,9 @@ void screenTonite() {
     char l[40];
     snprintf(l, sizeof(l), "BEST %02d:00 %d%% %s",
              lt.tm_hour, calcScore(slots[best]), cloudText(slots[best].cloudcover));
-    drawText(10, 162, COL_TEXT, l);              // TONITE: best imaging window time/score/cloud desc
+    drawText(70, 164, COL_DIM, l);              // TONITE: best imaging window time/score/cloud desc
   } else {
-    drawText(10, 162, COL_DIM, "No good window tonight");
+    drawText(70, 164, COL_DIM, "No good window tonight");
   }
 }
 
@@ -773,25 +1016,45 @@ void screenConditions() {
 
   AstroSlot& s = slots[0];
   canvas->setFont(FONT_MD);
-  char l[32];
+  char l[40];
 
-  // Temperature
-  snprintf(l, sizeof(l), "TEMP  %d\xB0" "C", s.temp2m);
-  drawText(10, 57, COL_TEXT, l);              // CONDTNS: temperature
+  NightWindow nw;
+  bool haveWindow = computeTonightWindow(nw);
+
+  // Dusk/dawn — tonight's real dark-hours window (see computeTonightWindow()).
+  // Named DUSK/DAWN rather than RISE/SET: RISE conventionally means sunrise,
+  // so an evening time under a "RISE" label would read backwards.
+  if (haveWindow) {
+    struct tm dlt, alt;
+    localtime_r(&nw.start, &dlt);
+    localtime_r(&nw.end, &alt);
+    snprintf(l, sizeof(l), "DUSK %02d:%02d   DAWN %02d:%02d",
+             dlt.tm_hour, dlt.tm_min, alt.tm_hour, alt.tm_min);
+    drawText(10, 50, COL_TEXT, l);              // CONDTNS: tonight's dusk/dawn times
+  }
+
+  // Temperature — current reading, plus tonight's low/high when available.
+  int lo, hi;
+  if (haveWindow && nightTempRange(nw, lo, hi)) {
+    snprintf(l, sizeof(l), "TEMP  %d\xB0" "C (%d-%d\xB0 tonight)", s.temp2m, lo, hi);
+  } else {
+    snprintf(l, sizeof(l), "TEMP  %d\xB0" "C", s.temp2m);
+  }
+  drawText(10, 80, COL_TEXT, l);               // CONDTNS: temperature (+ overnight range)
 
   // Wind
   snprintf(l, sizeof(l), "WIND  %s %dkm/h", s.winddir, windKmh(s.windspd));
-  drawText(10, 91, COL_TEXT, l);              // CONDTNS: wind direction + speed
+  drawText(10, 109, COL_TEXT, l);              // CONDTNS: wind direction + speed
 
   // Humidity — highlighted if high enough to risk dew forming on optics
   bool dewRisk = s.rh2m >= 85;
   snprintf(l, sizeof(l), "HUM   %d%%", s.rh2m);
-  drawText(10, 125, dewRisk ? COL_WARN : COL_TEXT, l);   // CONDTNS: relative humidity
+  drawText(10, 138, dewRisk ? COL_WARN : COL_TEXT, l);   // CONDTNS: relative humidity
 
   // Precipitation
   bool raining = strcmp(s.prectype, "none") != 0;
   snprintf(l, sizeof(l), "RAIN  %s", raining ? s.prectype : "NONE");
-  drawText(10, 159, raining ? COL_BAD : COL_TEXT, l);    // CONDTNS: precipitation type
+  drawText(10, 166, raining ? COL_BAD : COL_TEXT, l);    // CONDTNS: precipitation type
 }
 
 // ---------------------------------------------------------------------------
@@ -1069,8 +1332,8 @@ void setup() {
                                 // avoid heat buildup behind the screen
 
   rgbLed.begin();
-  rgbLed.setBrightness(30);   // dim ambient glow, not a flashlight — raise if
-                              // you want it more visible from across the room
+  rgbLed.setBrightness(255);  // full brightness, matches factory demo — lower
+                              // if you want a dimmer ambient glow instead
   rgbLed.show();              // starts off; updateStatusLed() lights it once
                                // the first fetch completes (see doFetchAstro())
 
