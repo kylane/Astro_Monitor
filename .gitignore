@@ -2,4 +2,5 @@ build/
 *.hex
 *.elf
 *.bin
+!docs/firmware/*.bin
 .vscode/

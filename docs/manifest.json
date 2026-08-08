@@ -1,0 +1,12 @@
+{
+  "name": "Astro Sky Conditions Monitor",
+  "version": "2026.08.09",
+  "builds": [
+    {
+      "chipFamily": "ESP32-C6",
+      "parts": [
+        { "path": "firmware/astro-monitor-c6.bin", "offset": 0 }
+      ]
+    }
+  ]
+}

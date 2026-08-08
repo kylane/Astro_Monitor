@@ -355,6 +355,31 @@ Display pins, rotation, backlight brightness, colors, fonts, and the status LED 
 
 ---
 
+## Updating a device without re-uploading from source
+
+If you've handed a board to someone else, they don't need Arduino IDE, the
+libraries, or to mail it back to you to get a newer firmware version — send
+them the flasher page instead: **https://kylane.github.io/Astro_Monitor/**
+(once GitHub Pages is enabled for this repo). It flashes over USB straight
+from Chrome or Edge (via [ESP Web Tools](https://esphome.github.io/esp-web-tools/)),
+no installer required. They still need to do the manual BOOT+RESET bootloader
+entry described above — the page walks through it.
+
+To publish a new version after making changes:
+
+```
+arduino-cli compile --fqbn "esp32:esp32:esp32c6:CPUFreq=160,FlashFreq=80,FlashSize=4M,PartitionScheme=min_spiffs,UploadSpeed=921600" --export-binaries .
+cp build/esp32.esp32.esp32c6/astro_monitor.ino.merged.bin docs/firmware/astro-monitor-c6.bin
+```
+
+Then bump `version` in `docs/manifest.json` and commit/push — the flasher
+page always serves whatever is currently in `docs/`. Note this is a full
+reflash (bootloader + partitions + app in one merged image), so it wipes
+saved WiFi/location settings same as a factory reset — the recipient will
+need to go through WiFi & Location Setup again afterwards.
+
+---
+
 ## License
 
 MIT — do whatever you like with it.
