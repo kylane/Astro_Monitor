@@ -28,6 +28,12 @@
     font-size: 0.95rem;
   }
   code { background: #eee; padding: 0.1rem 0.35rem; border-radius: 3px; }
+  h2 { font-size: 1.05rem; margin: 2.5rem 0 1rem; border-top: 1px solid #ddd; padding-top: 1.75rem; }
+  .changelog dt { font-weight: 600; margin-top: 1.1rem; }
+  .changelog dt:first-child { margin-top: 0; }
+  .changelog dd { margin: 0.3rem 0 0; padding-left: 0; }
+  .changelog ul { margin: 0.2rem 0 0; padding-left: 1.1rem; font-size: 0.92rem; color: #444; }
+  .changelog li { margin-bottom: 0.25rem; }
 </style>
 </head>
 <body>
@@ -70,5 +76,42 @@
     CP210x or CH340 USB-serial driver for your OS — search for the driver name
     plus your operating system.
   </div>
+
+  <h2>Changelog</h2>
+  <dl class="changelog">
+    <dt>2026-08-09</dt>
+    <dd>
+      <ul>
+        <li>TONITE now scores tonight's real sunset&rarr;sunrise window (from your saved location) instead of just the nearest forecast slot, and the best-imaging-window search uses that same real window instead of a fixed 20:00&ndash;05:00 guess</li>
+        <li>Added a condensed one-line overnight trend summary to TONITE</li>
+        <li>Added this browser-based flasher — no more mailing boards back for updates</li>
+      </ul>
+    </dd>
+    <dt>2026-07-07</dt>
+    <dd>
+      <ul>
+        <li>Switched the 7Timer forecast fetch to plain HTTP — fixes intermittent empty/truncated responses caused by HTTPS session buffers straining the ESP8266's limited heap</li>
+        <li>Added a SYSTEM screen showing uptime and fetch health, plus an automatic recovery restart if data goes stale for 3+ hours</li>
+      </ul>
+    </dd>
+    <dt>2026-07-06</dt>
+    <dd>
+      <ul>
+        <li>Added a screen-rotation-time setting to the setup portal</li>
+      </ul>
+    </dd>
+    <dt>2026-07-05</dt>
+    <dd>
+      <ul>
+        <li>Added the WiFi/location setup portal, so settings can be changed without re-flashing</li>
+      </ul>
+    </dd>
+    <dt>2026-07-01</dt>
+    <dd>
+      <ul>
+        <li>Initial release</li>
+      </ul>
+    </dd>
+  </dl>
 </body>
 </html>
