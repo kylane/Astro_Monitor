@@ -100,7 +100,7 @@ The device rotates through 6 screens, each displayed for 6 seconds.
 
 ### Screen 1 — TONITE
 
-**Overall go/no-go assessment for right now.**
+**Overall go/no-go assessment for tonight's dark hours.**
 
 ```
 TONITE 1/5                 21:04:33
@@ -108,7 +108,7 @@ TONITE 1/5                 21:04:33
 ████████████████░░░░░░░░░░░░░░░░  ← score bar
         GOOD ENOUGH
       Conditions are good
-CLD:5  SEE:6  TRN:4
+Clear til 23:00
 BEST WINDOW: 23:00  SCR:82
 FEW CLOUDS
 ```
@@ -125,7 +125,9 @@ FEW CLOUDS
 | DOUBTFUL | 25–44 | Poor conditions, probably not worth it |
 | TERRIBLE | 0–24 | Bad conditions, stay inside |
 
-**Score calculation** — weighted average of four factors:
+**Score calculation** — the score and verdict are the *average* of the weighted score below across every forecast slot inside tonight's real dark-hours window (sunset today → sunrise tomorrow, computed from your lat/lon — see below), not just the nearest forecast slot. A single bad hour barely moves the average; a problem that shows up and stays (e.g. clouds rolling in after a clear sunset) correctly drags it down.
+
+Each slot's own weighted score comes from four factors:
 
 | Factor | Weight | How it's scored |
 |--------|--------|----------------|
@@ -135,7 +137,11 @@ FEW CLOUDS
 | Lifted index | 10% | Atmospheric stability. ≥0 = stable = 100pts; negative = unstable |
 | Precipitation | — | Any rain/snow automatically returns score of 0 regardless of other factors |
 
-**BEST WINDOW** shows the highest-scoring 3-hour slot between 20:00 and 05:00 tonight, with its score and cloud description.
+**Trend line** narrates how conditions change across the night in a single condensed line (the 128×64 OLED doesn't have room for a full sentence): `Clear all night` / `Poor all night`, `Clear til 23:00` / `Poor til 23:00` for a single transition, `Dips 23:00 3h` / `Clears 23:00 3h` for a dip-and-recover night, or `Variable overnight` for anything choppier than that.
+
+**BEST WINDOW** shows the highest-scoring 3-hour slot inside tonight's real dark-hours window, with its score and cloud description.
+
+**Dark-hours window** is computed from your saved lat/lon using the standard sunrise/sunset equation (civil twilight, i.e. sun ~0.83° below the horizon) — not a fixed 20:00–05:00 guess — so it tracks the actual season (e.g. much earlier sunsets in winter). If you're checking the device between midnight and dawn, "tonight" still correctly means the window that opened at *yesterday's* sunset, not tonight's upcoming one.
 
 ---
 
@@ -296,6 +302,29 @@ If **UPD** keeps climbing (hours old) instead of resetting back near zero every 
 - If no forecast data has been fetched successfully yet, the device shows "Refreshing data" and retries every 10 seconds for the first 10 attempts, then backs off to retrying every 60 seconds with a "Retrying... try a power cycle if this persists" message. This is normal recovery behaviour after a fresh boot and usually resolves within a minute or two on its own.
 - If the device *has* successfully fetched data before but then goes 3+ hours without a successful refresh, it now restarts itself automatically to clear the problem, rather than silently displaying the same stale forecast indefinitely. Check the **SYSTEM** screen any time to confirm data is actually current.
 - All on-screen forecast times (CLOUDS, FORECAST, TONITE's best window) are calculated from the last successful fetch time, not the live clock — so they stay accurate even if a refresh is overdue, instead of drifting forward with real time while showing stale data.
+
+---
+
+## Updating a device without re-uploading from source
+
+If you've handed a board to someone else, they don't need Arduino IDE or the
+libraries to get a newer firmware version — send them the flasher page
+instead: **https://kylane.github.io/Astro_Monitor/**. It flashes over USB
+straight from Chrome or Edge (via [ESP Web Tools](https://esphome.github.io/esp-web-tools/)),
+no installer required. Unlike the ESP32-C6 board, this one has auto-reset
+circuitry, so there's no manual bootloader-entry dance — just plug it in and
+click install.
+
+To publish a new version after making changes:
+
+```
+arduino-cli compile --fqbn "esp8266:esp8266:nodemcuv2:baud=115200,eesz=4M2M" --export-binaries .
+```
+
+Then copy `build/esp8266.esp8266.nodemcuv2/astro_monitor.ino.bin` into the
+flasher site's repo (on the `ESP32-C6-LCD-1.47` branch, since that's what
+GitHub Pages currently serves — see that branch's README for the full
+publishing steps), bump the version in its manifest, and commit/push there.
 
 ---
 

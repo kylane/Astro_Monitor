@@ -38,6 +38,7 @@
 #include <Wire.h>
 #include <ArduinoJson.h>
 #include <time.h>
+#include <math.h>   // sin/cos/atan/acos/fmod — sunrise/sunset calc (see calcSunEvent())
 
 // ---------------------------------------------------------------------------
 // Config — edit config.h for default location/timezone and display timing.
@@ -68,6 +69,16 @@ struct AstroSlot {
   int  temp2m;        // temperature °C
   char prectype[8];   // "none", "rain", "snow", etc.
 };
+
+// Tonight's real sunset->sunrise window (see computeTonightWindow()) — and
+// one run of consecutive clear/poor slots within it (see
+// buildNightSegments()). Declared here rather than next to the functions
+// that use them: the Arduino IDE hoists auto-generated function prototypes
+// to the top of the file, above any type defined later, so a struct used in
+// a function signature has to be declared this early or the hoisted
+// prototype fails to compile.
+struct NightWindow { time_t start; time_t end; };
+struct NightSegment { bool clear; time_t start; };
 
 const uint8_t MAX_SLOTS = 16;   // up to 48 hours ahead
 AstroSlot slots[MAX_SLOTS];
@@ -209,22 +220,205 @@ int calcScore(const AstroSlot& s) {
   return (cloudScore * 50 + seeingScore * 25 + transScore * 15 + liScore * 10) / 100;
 }
 
-// Find the best nighttime slot (18:00–06:00 local) in next 24h
-// Returns index into slots[], or -1 if none
+// A slot counts as "clear" for trend/threshold purposes at the same cutoff
+// goNoGo() uses for GOOD ENOUGH — below this it's rated "poor".
+const int CLEAR_SCORE_CUTOFF = 65;
+
+// ---------------------------------------------------------------------------
+// Sunrise/sunset — the real dark-hours window for tonight, used below to
+// decide which forecast slots actually belong to "tonight" rather than a
+// fixed 20:00-05:00 guess. Standard Sunrise/Sunset equation (public domain,
+// see https://edwilliams.org/sunrise_sunset_algorithm.htm); zenith 90.833
+// accounts for atmospheric refraction and the sun's apparent radius (civil
+// sunrise/sunset, matches what you'd call "dark" by eye).
+// ---------------------------------------------------------------------------
+
+// Days since 1970-01-01 for a proleptic-Gregorian UTC calendar date (Howard
+// Hinnant's days_from_civil) — used instead of timegm(), which isn't
+// guaranteed available on the ESP8266 toolchain.
+static long daysFromCivil(int y, int m, int d) {
+  y -= (m <= 2) ? 1 : 0;
+  long era = (y >= 0 ? y : y - 399) / 400;
+  unsigned yoe = (unsigned)(y - era * 400);
+  unsigned doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+  unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+  return era * 146097L + (long)doe - 719468L;
+}
+
+// Computes sunrise or sunset (UTC epoch) for a given calendar date/location.
+// Returns false if the sun doesn't rise/set that day (polar latitudes only —
+// won't happen at any latitude this device is realistically deployed at, but
+// cheap to guard against a NaN propagating into the score).
+bool calcSunEvent(float lat, float lon, int year, int month, int day, bool sunrise, time_t& outEpoch) {
+  const double zenith = 90.833;
+  const double deg2rad = PI / 180.0;
+  const double rad2deg = 180.0 / PI;
+
+  int N1 = (275 * month) / 9;
+  int N2 = (month + 9) / 12;
+  int N3 = (1 + (year - 4 * (year / 4) + 2) / 3);
+  int N = N1 - (N2 * N3) + day - 30;
+
+  double lngHour = lon / 15.0;
+  double t = sunrise ? (N + ((6 - lngHour) / 24)) : (N + ((18 - lngHour) / 24));
+
+  double M = (0.9856 * t) - 3.289;
+
+  double L = M + (1.916 * sin(M * deg2rad)) + (0.020 * sin(2 * M * deg2rad)) + 282.634;
+  L = fmod(L + 360.0, 360.0);
+
+  double RA = rad2deg * atan(0.91764 * tan(L * deg2rad));
+  RA = fmod(RA + 360.0, 360.0);
+  double Lquadrant  = floor(L / 90) * 90;
+  double RAquadrant = floor(RA / 90) * 90;
+  RA = (RA + (Lquadrant - RAquadrant)) / 15.0;
+
+  double sinDec = 0.39782 * sin(L * deg2rad);
+  double cosDec = cos(asin(sinDec));
+
+  double cosH = (cos(zenith * deg2rad) - (sinDec * sin(lat * deg2rad))) / (cosDec * cos(lat * deg2rad));
+  if (cosH > 1.0 || cosH < -1.0) return false;
+
+  double H = sunrise ? (360.0 - rad2deg * acos(cosH)) : (rad2deg * acos(cosH));
+  H = H / 15.0;
+
+  double T = H + RA - (0.06571 * t) - 6.622;
+  double UT = fmod(T - lngHour + 24.0, 24.0);
+
+  outEpoch = (time_t)(daysFromCivil(year, month, day) * 86400L + (long)(UT * 3600.0));
+  return true;
+}
+
+// Tonight's real sunset->sunrise window. If it's currently after midnight
+// but before dawn, "tonight" is still the tail of the window that opened at
+// yesterday's sunset — not a window starting at today's (upcoming) sunset.
+bool computeTonightWindow(NightWindow& nw) {
+  time_t now = time(nullptr);
+  struct tm lt;
+  localtime_r(&now, &lt);
+
+  time_t sunriseToday, sunsetToday;
+  if (!calcSunEvent(homeLat, homeLon, lt.tm_year + 1900, lt.tm_mon + 1, lt.tm_mday, true,  sunriseToday)) return false;
+  if (!calcSunEvent(homeLat, homeLon, lt.tm_year + 1900, lt.tm_mon + 1, lt.tm_mday, false, sunsetToday))  return false;
+
+  if (now < sunriseToday) {
+    time_t yesterday = now - 86400L;
+    struct tm ylt;
+    localtime_r(&yesterday, &ylt);
+    time_t sunsetYesterday;
+    if (!calcSunEvent(homeLat, homeLon, ylt.tm_year + 1900, ylt.tm_mon + 1, ylt.tm_mday, false, sunsetYesterday)) return false;
+    nw.start = sunsetYesterday;
+    nw.end   = sunriseToday;
+  } else {
+    time_t tomorrow = now + 86400L;
+    struct tm tlt;
+    localtime_r(&tomorrow, &tlt);
+    time_t sunriseTomorrow;
+    if (!calcSunEvent(homeLat, homeLon, tlt.tm_year + 1900, tlt.tm_mon + 1, tlt.tm_mday, true, sunriseTomorrow)) return false;
+    nw.start = sunsetToday;
+    nw.end   = sunriseTomorrow;
+  }
+  return true;
+}
+
+bool slotInWindow(uint8_t i, const NightWindow& nw) {
+  time_t st = lastFetchEpoch + (slots[i].timepoint * 3600L);
+  return st >= nw.start && st < nw.end;
+}
+
+// Average score across tonight's real sunset->sunrise window — this is what
+// TONITE's headline score/verdict represents, not just the nearest forecast
+// slot. A single bad hour barely moves it; a sustained bad stretch (e.g.
+// clouds rolling in after a clear sunset and staying) correctly drags it
+// down. Returns -1 if the window can't be computed or no slots fall in it
+// (e.g. stale/short forecast data) — callers fall back to the nearest slot.
+int tonightAverageScore() {
+  if (!dataValid || slotCount == 0) return -1;
+  NightWindow nw;
+  if (!computeTonightWindow(nw)) return -1;
+  int sum = 0, count = 0;
+  for (uint8_t i = 0; i < slotCount; i++) {
+    if (!slotInWindow(i, nw)) continue;
+    sum += calcScore(slots[i]);
+    count++;
+  }
+  return (count > 0) ? (sum / count) : -1;
+}
+
+// Run-length-encodes tonight's slots into at most maxSegs clear/poor
+// segments. Stops growing past maxSegs rather than erroring — a night
+// choppier than that just reads as "Variable overnight" (see
+// tonightTrendShort()), so extra segments wouldn't be shown anyway.
+int buildNightSegments(const NightWindow& nw, NightSegment* segs, int maxSegs) {
+  int n = 0;
+  bool haveCur = false, curClear = false;
+  for (uint8_t i = 0; i < slotCount; i++) {
+    if (!slotInWindow(i, nw)) continue;
+    bool clear = calcScore(slots[i]) >= CLEAR_SCORE_CUTOFF;
+    if (!haveCur || clear != curClear) {
+      if (n >= maxSegs) break;
+      segs[n].clear = clear;
+      segs[n].start = lastFetchEpoch + (slots[i].timepoint * 3600L);
+      n++;
+      curClear = clear;
+      haveCur = true;
+    }
+  }
+  return n;
+}
+
+// One-line version of the C6 build's two-line trend narrative — the 128x64
+// OLED doesn't have room for a full sentence, so this condenses to the same
+// shape/time info in a single ~20-24 char line instead of prose.
+void tonightTrendShort(char* line, size_t lineSize) {
+  NightWindow nw;
+  if (!dataValid || slotCount == 0 || !computeTonightWindow(nw)) {
+    snprintf(line, lineSize, "No data for tonight");
+    return;
+  }
+  NightSegment segs[4];
+  int n = buildNightSegments(nw, segs, 4);
+  if (n <= 0) {
+    snprintf(line, lineSize, "No data for tonight");
+    return;
+  }
+
+  struct tm lt;
+  char t1[6], t2[6];
+  switch (n) {
+    case 1:
+      snprintf(line, lineSize, "%s", segs[0].clear ? "Clear all night" : "Poor all night");
+      break;
+    case 2:
+      localtime_r(&segs[1].start, &lt);
+      snprintf(t1, sizeof(t1), "%02d:%02d", lt.tm_hour, lt.tm_min);
+      snprintf(line, lineSize, "%s til %s", segs[0].clear ? "Clear" : "Poor", t1);
+      break;
+    case 3: {
+      localtime_r(&segs[1].start, &lt);
+      snprintf(t1, sizeof(t1), "%02d:%02d", lt.tm_hour, lt.tm_min);
+      (void)t2;
+      int dipHours = (int)((segs[2].start - segs[1].start) / 3600L);
+      snprintf(line, lineSize, "%s %s %dh", segs[0].clear ? "Dips" : "Clears", t1, dipHours);
+      break;
+    }
+    default:
+      snprintf(line, lineSize, "Variable overnight");
+      break;
+  }
+}
+
+// Best-scoring slot within tonight's real sunset->sunrise window.
+// Returns index into slots[], or -1 if none (window unavailable, or no
+// slots fall inside it).
 int bestNightSlot() {
   if (!dataValid || slotCount == 0) return -1;
+  NightWindow nw;
+  if (!computeTonightWindow(nw)) return -1;
   int bestIdx = -1;
   int bestScore = -1;
-  // Anchor to the last successful fetch, not the live clock — timepoint is
-  // hours-from-fetch, so using time(nullptr) here would drift the mapping
-  // between slot and clock-hour further off the longer data goes stale.
   for (uint8_t i = 0; i < slotCount; i++) {
-    time_t slotTime = lastFetchEpoch + (slots[i].timepoint * 3600L);
-    struct tm lt;
-    localtime_r(&slotTime, &lt);
-    int h = lt.tm_hour;
-    bool isNight = (h >= 20 || h < 5);   // 8pm–5am
-    if (!isNight) continue;
+    if (!slotInWindow(i, nw)) continue;
     int score = calcScore(slots[i]);
     if (score > bestScore) {
       bestScore = score;
@@ -488,8 +682,12 @@ void screenTonite() {
     return;
   }
 
-  // Score the next slot (closest to now) for current conditions
-  int curScore = (slotCount > 0) ? calcScore(slots[0]) : 0;
+  // Headline score/verdict = average across tonight's real sunset->sunrise
+  // window (see tonightAverageScore()), not just the nearest forecast slot —
+  // falls back to the nearest slot only if the window itself is unavailable
+  // (e.g. clock not synced yet).
+  int curScore = tonightAverageScore();
+  if (curScore < 0) curScore = (slotCount > 0) ? calcScore(slots[0]) : 0;
   const char* verdict = goNoGo(curScore);
   const char* sub     = goNoGoSub(curScore);
 
@@ -506,13 +704,14 @@ void screenTonite() {
   int sw = u8g2.getStrWidth(sub);
   u8g2.drawStr((128 - sw) / 2, 44, sub);        // TONITE: subtitle centred, Y=44
 
-  // Current slot details
-  if (slotCount > 0) {
+  // Overnight trend — condensed one-line version of the shape of the night
+  // (see tonightTrendShort()), since a single average can't tell "great all
+  // night" apart from "great early, ruined after midnight".
+  {
     u8g2.setFont(u8g2_font_5x7_tr);
-    char l[32];
-    snprintf(l, sizeof(l), "CLD:%d  SEE:%d  TRN:%d",
-             slots[0].cloudcover, slots[0].seeing, slots[0].transparency);
-    u8g2.drawStr(2, 52, l);              // TONITE: cloud/seeing/transparency ratings, Y=52
+    char l[24];
+    tonightTrendShort(l, sizeof(l));
+    u8g2.drawStr(2, 52, l);              // TONITE: overnight trend, Y=52
   }
 
   // Best tonight window
