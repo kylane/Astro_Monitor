@@ -4,74 +4,75 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Astro Monitor — Firmware Updater</title>
-<script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
 <style>
   body {
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
-    max-width: 640px;
+    max-width: 720px;
     margin: 3rem auto;
     padding: 0 1.5rem;
     line-height: 1.5;
     color: #1a1a1a;
   }
   h1 { font-size: 1.5rem; margin-bottom: 0.25rem; }
-  .sub { color: #666; margin-top: 0; }
-  ol { padding-left: 1.25rem; }
-  li { margin-bottom: 0.6rem; }
-  esp-web-install-button { display: block; margin: 2rem 0; }
-  .note {
-    background: #f4f4f4;
-    border-left: 4px solid #999;
-    padding: 0.75rem 1rem;
-    margin: 1.5rem 0;
-    font-size: 0.95rem;
+  .sub { color: #666; margin-top: 0; margin-bottom: 2.5rem; }
+  .cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 1.25rem;
   }
-  .warn { border-left-color: #d9822b; background: #fff6ea; }
-  code { background: #eee; padding: 0.1rem 0.35rem; border-radius: 3px; }
+  .card {
+    display: block;
+    border: 1px solid #ddd;
+    border-radius: 10px;
+    overflow: hidden;
+    text-decoration: none;
+    color: inherit;
+    transition: border-color 0.15s, box-shadow 0.15s;
+  }
+  .card:hover, .card:focus-visible {
+    border-color: #999;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.08);
+  }
+  .card img {
+    width: 100%;
+    height: 180px;
+    object-fit: cover;
+    display: block;
+    background: #eee;
+  }
+  .card .body { padding: 1rem 1.1rem 1.2rem; }
+  .card h2 { font-size: 1.05rem; margin: 0 0 0.3rem; }
+  .card p { font-size: 0.88rem; color: #666; margin: 0; }
+  .card .go {
+    display: inline-block;
+    margin-top: 0.7rem;
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: #1a1a1a;
+  }
 </style>
 </head>
 <body>
   <h1>Astro Sky Conditions Monitor</h1>
-  <p class="sub">Firmware updater for the Waveshare ESP32-C6-LCD-1.47 board</p>
+  <p class="sub">Pick the board you're updating.</p>
 
-  <p>This page flashes the latest firmware straight to your device over USB — no software to install.</p>
-
-  <ol>
-    <li>Plug the board into your computer with a USB-C cable.</li>
-    <li>
-      Put the board into bootloader mode:
-      <b>hold BOOT</b>, <b>tap RESET</b>, then <b>release BOOT</b>.
-      (Don't hold BOOT down while plugging in the cable or before pressing RESET —
-      only press it after the board already has power.)
-    </li>
-    <li>Click <b>Connect and Install</b> below, then pick the board's serial port from the browser's list.</li>
-    <li>Wait for it to finish (about a minute), then press <b>RESET</b> once to boot the new firmware.</li>
-  </ol>
-
-  <esp-web-install-button manifest="./manifest.json">
-    <button slot="activate">Connect and Install</button>
-    <span slot="unsupported">
-      Your browser doesn't support this. Please open this page in
-      <b>Chrome</b> or <b>Edge</b> on a desktop computer.
-    </span>
-    <span slot="not-allowed">
-      This page needs to be loaded over HTTPS to flash a device — try reloading it.
-    </span>
-  </esp-web-install-button>
-
-  <div class="note warn">
-    <b>This is a full reflash</b>, so it resets the device back to its
-    out-of-the-box state — your saved WiFi network and location settings will
-    be cleared. After it reboots, join the <code>AstroMonitor-Setup</code>
-    WiFi network again and re-enter your details, exactly like first setup.
-  </div>
-
-  <div class="note">
-    Only works in <b>Chrome</b> or <b>Edge</b> on Windows, macOS, Linux or ChromeOS
-    (desktop) — Safari and Firefox don't support the WebSerial connection this
-    page uses. If the board's port doesn't show up in the list, you may need a
-    CP210x/CH34x USB-serial driver for your OS — search for the driver name
-    plus your operating system.
+  <div class="cards">
+    <a class="card" href="c6/">
+      <img src="img/c6.jpg" alt="Waveshare ESP32-C6-LCD-1.47 Astro Monitor">
+      <div class="body">
+        <h2>Color LCD board</h2>
+        <p>Waveshare ESP32-C6-LCD-1.47 — 1.47" color display, built-in status LED</p>
+        <span class="go">Flash this one &rarr;</span>
+      </div>
+    </a>
+    <a class="card" href="esp8266/">
+      <img src="img/esp8266.jpg" alt="ESP8266 + OLED Astro Monitor">
+      <div class="body">
+        <h2>OLED board</h2>
+        <p>ESP8266 (NodeMCU/FREENOVE) — 1.3" monochrome OLED display</p>
+        <span class="go">Flash this one &rarr;</span>
+      </div>
+    </a>
   </div>
 </body>
 </html>

@@ -359,24 +359,46 @@ Display pins, rotation, backlight brightness, colors, fonts, and the status LED 
 
 If you've handed a board to someone else, they don't need Arduino IDE, the
 libraries, or to mail it back to you to get a newer firmware version — send
-them the flasher page instead: **https://kylane.github.io/Astro_Monitor/**
-(once GitHub Pages is enabled for this repo). It flashes over USB straight
-from Chrome or Edge (via [ESP Web Tools](https://esphome.github.io/esp-web-tools/)),
-no installer required. They still need to do the manual BOOT+RESET bootloader
-entry described above — the page walks through it.
+them the flasher page instead: **https://kylane.github.io/Astro_Monitor/**.
+It's a chooser between this board and the older ESP8266/OLED build (see
+`main` branch), each flashing over USB straight from Chrome or Edge (via
+[ESP Web Tools](https://esphome.github.io/esp-web-tools/)), no installer
+required. This board's recipients still need to do the manual BOOT+RESET
+bootloader entry described above — the C6 flasher page walks through it.
 
-To publish a new version after making changes:
+GitHub Pages serves this branch's `docs/` folder for both devices, since
+Pages can only serve one branch at a time — the ESP8266 build's binary lives
+here too (copied over from `main`), it isn't compiled from this branch's
+`.ino`. `docs/` is laid out as:
+
+```
+docs/
+├── index.html            chooser landing page
+├── img/{c6,esp8266}.jpg  photos used on the chooser
+├── c6/                   this board's flasher (index.html, manifest.json, firmware/)
+└── esp8266/               ESP8266/OLED board's flasher (same layout)
+```
+
+To publish a new version of **this board's** firmware after making changes:
 
 ```
 arduino-cli compile --fqbn "esp32:esp32:esp32c6:CPUFreq=160,FlashFreq=80,FlashSize=4M,PartitionScheme=min_spiffs,UploadSpeed=921600" --export-binaries .
-cp build/esp32.esp32.esp32c6/astro_monitor.ino.merged.bin docs/firmware/astro-monitor-c6.bin
+cp build/esp32.esp32.esp32c6/astro_monitor.ino.merged.bin docs/c6/firmware/astro-monitor-c6.bin
 ```
 
-Then bump `version` in `docs/manifest.json` and commit/push — the flasher
-page always serves whatever is currently in `docs/`. Note this is a full
-reflash (bootloader + partitions + app in one merged image), so it wipes
-saved WiFi/location settings same as a factory reset — the recipient will
-need to go through WiFi & Location Setup again afterwards.
+Then bump `version` in `docs/c6/manifest.json` and commit/push. Note this is
+a full reflash (bootloader + partitions + app in one merged image), so it
+wipes saved WiFi/location settings same as a factory reset — the recipient
+will need to go through WiFi & Location Setup again afterwards.
+
+To publish a new version of the **ESP8266/OLED build's** firmware: compile it
+on the `main` branch (see that branch's README for the exact command), copy
+the resulting `astro_monitor.ino.bin` here as
+`docs/esp8266/firmware/astro-monitor-esp8266.bin`, bump `version` in
+`docs/esp8266/manifest.json`, and commit/push on this branch. Unlike the C6
+board, this one keeps saved WiFi/location settings across a reflash — the
+compiled image is smaller than the flash chip and only overwrites the app
+region, leaving the settings/WiFi-config regions untouched.
 
 ---
 

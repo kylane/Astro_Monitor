@@ -1,0 +1,12 @@
+{
+  "name": "Astro Sky Conditions Monitor (ESP8266 / OLED)",
+  "version": "2026.08.09",
+  "builds": [
+    {
+      "chipFamily": "ESP8266",
+      "parts": [
+        { "path": "firmware/astro-monitor-esp8266.bin", "offset": 0 }
+      ]
+    }
+  ]
+}
