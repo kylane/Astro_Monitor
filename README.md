@@ -106,7 +106,7 @@ The device rotates through 6 screens, each displayed for 6 seconds.
 TONITE 1/5                 21:04:33
              Brisbane
 ████████████████░░░░░░░░░░░░░░░░  ← score bar
-        GOOD ENOUGH
+        GOOD
       Conditions are good
 Clear til 23:00
 BEST WINDOW: 23:00  SCR:82
@@ -119,11 +119,11 @@ FEW CLOUDS
 
 | Verdict | Score | Meaning |
 |---------|-------|---------|
-| PERFECT | 85–100 | Exceptional night, ideal for imaging |
-| GOOD ENOUGH | 65–84 | Good conditions, worth setting up |
-| MARGINAL | 45–64 | Marginal but usable |
-| DOUBTFUL | 25–44 | Poor conditions, probably not worth it |
-| TERRIBLE | 0–24 | Bad conditions, stay inside |
+| PERFECT | 81–100 | Exceptional night, ideal for imaging |
+| GOOD | 61–80 | Good conditions, worth setting up |
+| MARGINAL | 41–60 | Marginal but usable |
+| DOUBTFUL | 21–40 | Poor conditions, probably not worth it |
+| TERRIBLE | 0–20 | Bad conditions, stay inside |
 
 **Score calculation** — the score and verdict are the *average* of the weighted score below across every forecast slot inside tonight's real dark-hours window (sunset today → sunrise tomorrow, computed from your lat/lon — see below), not just the nearest forecast slot. A single bad hour barely moves the average; a problem that shows up and stays (e.g. clouds rolling in after a clear sunset) correctly drags it down.
 

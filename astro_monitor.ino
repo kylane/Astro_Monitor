@@ -221,8 +221,8 @@ int calcScore(const AstroSlot& s) {
 }
 
 // A slot counts as "clear" for trend/threshold purposes at the same cutoff
-// goNoGo() uses for GOOD ENOUGH — below this it's rated "poor".
-const int CLEAR_SCORE_CUTOFF = 65;
+// goNoGo() uses for GOOD — below this it's rated "poor".
+const int CLEAR_SCORE_CUTOFF = 61;
 
 // ---------------------------------------------------------------------------
 // Sunrise/sunset — the real dark-hours window for tonight, used below to
@@ -651,18 +651,18 @@ void drawNoDataMessage() {
 
 // Score → GO / MARGINAL / NO GO label
 const char* goNoGo(int score) {
-  if (score >= 85) return "PERFECT";
-  if (score >= 65) return "GOOD ENOUGH";
-  if (score >= 45) return "MARGINAL";
-  if (score >= 25) return "DOUBTFUL";
+  if (score >= 81) return "PERFECT";
+  if (score >= 61) return "GOOD";
+  if (score >= 41) return "MARGINAL";
+  if (score >= 21) return "DOUBTFUL";
   return "TERRIBLE";
 }
 
 const char* goNoGoSub(int score) {
-  if (score >= 85) return "Conditions are perfect";
-  if (score >= 65) return "Conditions are good";
-  if (score >= 45) return "Conditions are ok at best";
-  if (score >= 25) return "Conditions are not great";
+  if (score >= 81) return "Conditions are perfect";
+  if (score >= 61) return "Conditions are good";
+  if (score >= 41) return "Conditions are ok at best";
+  if (score >= 21) return "Conditions are not great";
   return "Conditions are terrible";
 }
 
@@ -911,7 +911,7 @@ void screenForecast() {
 
     int score = calcScore(slots[i]);
     bool raining = strcmp(slots[i].prectype, "none") != 0;
-    const char* go = raining ? "RAIN" : (score >= 85 ? "GO!" : score >= 65 ? "GO" : score >= 45 ? "OK" : score >= 25 ? "DBT" : "NO");
+    const char* go = raining ? "RAIN" : (score >= 81 ? "GO!" : score >= 61 ? "GO" : score >= 41 ? "OK" : score >= 21 ? "DBT" : "NO");
     u8g2.drawStr(100, y, go);          // FORECAST: go/no-go label, Y=y
   }
 }
