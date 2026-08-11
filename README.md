@@ -118,13 +118,13 @@ After connecting, the device automatically looks up a human-readable place name 
 
 ## Onboard status LED
 
-The board's single WS2812 RGB LED mirrors the TONITE screen's verdict — green/yellow/orange/red on the same score bands (65/45/25) — so you can tell whether tonight's worth setting up without needing the screen rotation to land on TONITE. It stays off until the first successful (or failed) fetch resolves a score, and only updates when new data arrives, not continuously. Brightness defaults to full (`rgbLed.setBrightness(255)` in `setup()`, matching the factory demo) — lower it in `astro_monitor.ino` if you want a dimmer ambient glow instead.
+The board's single WS2812 RGB LED mirrors the TONITE screen's verdict — green/lime/yellow/orange/red on the same score bands (81/61/41/21) — so you can tell whether tonight's worth setting up without needing the screen rotation to land on TONITE. It stays off until the first successful (or failed) fetch resolves a score, and only updates when new data arrives, not continuously. Brightness defaults to full (`rgbLed.setBrightness(255)` in `setup()`, matching the factory demo) — lower it in `astro_monitor.ino` if you want a dimmer ambient glow instead.
 
 ---
 
 ## Screens
 
-The device rotates through 6 screens on a 320×172 color display. Ratings and verdicts are color-coded consistently everywhere (green = good, yellow = marginal, orange = doubtful, red = bad/raining), on top of the same text shown below (the mockups here are plain-text approximations of the actual color layout).
+The device rotates through 6 screens on a 320×172 color display. Ratings and verdicts are color-coded consistently everywhere (green = perfect, lime = good, yellow = marginal, orange = doubtful, red = bad/raining), on top of the same text shown below (the mockups here are plain-text approximations of the actual color layout).
 
 ---
 
@@ -135,7 +135,7 @@ The device rotates through 6 screens on a 320×172 color display. Ratings and ve
 ```
 TONITE 1/5                 21:04:33
  72%  Brisbane (BORTLE 5)
- ┌──┐ GOOD ENOUGH             ← colored by score
+ ┌──┐ GOOD                    ← colored by score
  │▓▓│ Clear early, dips around 23:00
  │▓▓│ for 3h, then clearing again
  │▓▓│ BEST 21:00 82% FEW CLOUDS
@@ -148,11 +148,11 @@ TONITE 1/5                 21:04:33
 
 | Verdict | Score | Meaning |
 |---------|-------|---------|
-| PERFECT | 85–100 | Exceptional night, ideal for imaging |
-| GOOD ENOUGH | 65–84 | Good conditions, worth setting up |
-| MARGINAL | 45–64 | Marginal but usable |
-| DOUBTFUL | 25–44 | Poor conditions, probably not worth it |
-| TERRIBLE | 0–24 | Bad conditions, stay inside |
+| PERFECT | 81–100 | Exceptional night, ideal for imaging |
+| GOOD | 61–80 | Good conditions, worth setting up |
+| MARGINAL | 41–60 | Marginal but usable |
+| DOUBTFUL | 21–40 | Poor conditions, probably not worth it |
+| TERRIBLE | 0–20 | Bad conditions, stay inside |
 
 **Score calculation** — the score and verdict are the *average* of the weighted score below across every forecast slot inside tonight's real dark-hours window (sunset today → sunrise tomorrow, computed from your lat/lon — see below), not just the nearest forecast slot. A single bad hour barely moves the average; a problem that shows up and stays (e.g. clouds rolling in after a clear sunset) correctly drags it down.
 

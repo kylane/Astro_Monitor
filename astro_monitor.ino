@@ -113,6 +113,7 @@ Adafruit_NeoPixel rgbLed(1, PIN_RGB_LED, NEO_RGB + NEO_KHZ800);  // this LED is 
 #define COL_DIM     RGB565_LIGHTGREY
 #define COL_HEADER  RGB565_CYAN
 #define COL_GOOD    RGB565_LIME
+#define COL_LIME    RGB565_CHARTREUSE
 #define COL_OK      RGB565_YELLOW
 #define COL_WARN    RGB565_ORANGE
 #define COL_BAD     RGB565_RED
@@ -271,18 +272,21 @@ int windKmh(int spd) {
   return tbl[spd];
 }
 
-// 0-100 "goodness" percentage → a traffic-light tier: 0=good, 1=ok, 2=warn, 3=bad.
-// Shared by the screen colors (scoreColor()) and the onboard status LED
-// (updateStatusLed()) so the two can never drift out of sync with each other.
+// 0-100 "goodness" percentage → a traffic-light tier: 0=perfect, 1=good, 2=ok,
+// 3=warn, 4=bad. Mirrors goNoGo()'s five verdict bands exactly, so a slot's
+// color always matches its verdict. Shared by the screen colors
+// (scoreColor()) and the onboard status LED (updateStatusLed()) so the two
+// can never drift out of sync with each other.
 int scoreTier(int pct) {
-  if (pct >= 65) return 0;
-  if (pct >= 45) return 1;
-  if (pct >= 25) return 2;
-  return 3;
+  if (pct >= 81) return 0;
+  if (pct >= 61) return 1;
+  if (pct >= 41) return 2;
+  if (pct >= 21) return 3;
+  return 4;
 }
 
 uint16_t scoreColor(int pct) {
-  static const uint16_t tierColor[] = { COL_GOOD, COL_OK, COL_WARN, COL_BAD };
+  static const uint16_t tierColor[] = { COL_GOOD, COL_LIME, COL_OK, COL_WARN, COL_BAD };
   return tierColor[scoreTier(pct)];
 }
 
@@ -314,8 +318,8 @@ int calcScore(const AstroSlot& s) {
 }
 
 // A slot counts as "clear" for trend/threshold purposes at the same cutoff
-// goNoGo() uses for GOOD ENOUGH — below this it's rated "poor".
-const int CLEAR_SCORE_CUTOFF = 65;
+// goNoGo() uses for GOOD — below this it's rated "poor".
+const int CLEAR_SCORE_CUTOFF = 61;
 
 // ---------------------------------------------------------------------------
 // Sunrise/sunset — the real dark-hours window for tonight, used below to
@@ -543,7 +547,8 @@ void updateStatusLed() {
     rgbLed.setPixelColor(0, 0);   // off — nothing to show a verdict for yet
   } else {
     static const uint32_t tierRgb[] = {
-      0x00FF00,  // good — green
+      0x00FF00,  // perfect — green
+      0x80FF00,  // good — lime
       0xFFFF00,  // ok — yellow
       0xFF8C00,  // warn — orange
       0xFF0000,  // bad — red
@@ -820,10 +825,10 @@ void drawNoDataMessage() {
 
 // Score → GO / MARGINAL / NO GO label
 const char* goNoGo(int score) {
-  if (score >= 85) return "PERFECT";
-  if (score >= 65) return "GOOD ENOUGH";
-  if (score >= 45) return "MARGINAL";
-  if (score >= 25) return "DOUBTFUL";
+  if (score >= 81) return "PERFECT";
+  if (score >= 61) return "GOOD";
+  if (score >= 41) return "MARGINAL";
+  if (score >= 21) return "DOUBTFUL";
   return "TERRIBLE";
 }
 
@@ -863,8 +868,8 @@ void screenTonite() {
   drawBarVertical(10, 56, 44, 110, curScore, 100, vcol);     // TONITE: score gauge 0-100, fills bottom-up
 
   // Big verdict — FONT_LG rather than FONT_XL: the gauge now takes the left
-  // edge, so "GOOD ENOUGH" (the widest verdict) needs to fit the narrower
-  // right-hand column rather than the full screen width.
+  // edge, so "MARGINAL"/"DOUBTFUL"/"TERRIBLE" (the widest verdicts) need to
+  // fit the narrower right-hand column rather than the full screen width.
   canvas->setFont(FONT_LG);
   drawText(70, 96, vcol, verdict);                          // TONITE: verdict text, large
 
@@ -1101,7 +1106,7 @@ void screenForecast() {
 
     int score = calcScore(slots[i]);
     bool raining = strcmp(slots[i].prectype, "none") != 0;
-    const char* go = raining ? "RAIN" : (score >= 85 ? "GO!" : score >= 65 ? "GO" : score >= 45 ? "OK" : score >= 25 ? "DBT" : "NO");
+    const char* go = raining ? "RAIN" : (score >= 81 ? "GO!" : score >= 61 ? "GO" : score >= 41 ? "OK" : score >= 21 ? "DBT" : "NO");
     uint16_t goCol = raining ? COL_BAD : scoreColor(score);
     drawText(270, y, goCol, go);                // FORECAST: go/no-go label
   }
