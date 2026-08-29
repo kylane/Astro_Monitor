@@ -94,7 +94,7 @@ After connecting, the device automatically looks up a human-readable place name 
 
 ## Screens
 
-The device rotates through 6 screens, each displayed for 6 seconds.
+The device rotates through 7 screens, each displayed for 6 seconds.
 
 ---
 
@@ -103,7 +103,7 @@ The device rotates through 6 screens, each displayed for 6 seconds.
 **Overall go/no-go assessment for tonight's dark hours.**
 
 ```
-TONITE 1/5                 21:04:33
+TONITE 1/7                 21:04:33
              Brisbane
 ████████████████░░░░░░░░░░░░░░░░  ← score bar
         GOOD
@@ -150,7 +150,7 @@ Each slot's own weighted score comes from four factors:
 **Bar chart of cloud cover for the next 18 hours (6 × 3-hour slots).**
 
 ```
-CLOUDS 2/5                 21:04:33
+CLOUDS 2/7                 21:04:33
  ┌──┐┌──┐┌──┐┌──┐┌──┐┌──┐ │OVC
  │  ││▓▓││▓▓││▓▓││  ││  │ │
  │▓▓││▓▓││▓▓││▓▓││  ││  │ │
@@ -178,7 +178,7 @@ Cloud cover scale:
 **Atmospheric seeing and transparency — how steady and clear the air is.**
 
 ```
-SEE RATING 3/5              21:04:33
+SEE RATING 3/7              21:04:33
 SEE           6  /8  GOOD
 TRANSPCY      5  /8  ABOVE AVG
 STABILITY: +6              STABLE
@@ -214,7 +214,7 @@ TREND: 6  6  5  4  4
 **Current surface conditions relevant to observing.**
 
 ```
-CONDTNS 4/5               21:04:33
+CONDTNS 4/7               21:04:33
 TEMP  12°C
 WIND  NE 7km/h
 HUM   65%
@@ -233,7 +233,7 @@ PREC  NONE
 **3-slot compact forecast table showing the next 9 hours.**
 
 ```
-FORECAST 5/5              21:04:33
+FORECAST 5/7              21:04:33
 ─────────────────────────────────
 TIME  CLD  SEE  TRN  GO?
 21:00   5    6    4   OK
@@ -259,12 +259,34 @@ Columns:
 
 ---
 
-### Screen 6 — SYSTEM
+### Screen 6 — MOON
+
+**Moon phase, illumination, and the next moonrise / moonset.**
+
+```
+MOON 6/7                  21:04:33
+  __      Waxing Gibbous
+ /##\     71% lit
+ |###|    9.4 days old
+ \##/     R 15:22  S 01:47
+```
+
+- **Phase disc** (left) — the Moon's lit fraction drawn to scale, with the full circle outlined so the phase reads against the whole disc. Oriented for your hemisphere: below the equator (saved latitude negative) the lit limb is mirrored, matching what you actually see.
+- **Phase name** — New / Waxing Crescent / First Quarter / Waxing Gibbous / Full / Waning Gibbous / Last Quarter / Waning Crescent. The four "exact" phases are only named within ~0.6 days of the real event.
+- **NN% lit** — illuminated fraction.
+- **N.N days old** — days since the last new moon (synodic month ≈ 29.5 days).
+- **R / S** — the *next* moonrise and *next* moonset from the current time, so in the evening you get tonight's rise and the following morning's set. Shows `--:--` for whichever doesn't occur in the next 25 hours — near new/full the Moon skips a rise or a set on roughly one day a month.
+
+All computed on-device from the clock and your saved lat/lon (Montenbruck & Pfleger's low-precision lunar model) — no API we call carries moon data, and none is needed. Because it doesn't touch the 7timer fetch, this screen stays live even while data fetches are failing. Phase and illumination are accurate to a fraction of a percent; rise/set to a minute or two. A small copy of the phase disc also appears in the top-right corner of the TONITE screen.
+
+---
+
+### Screen 7 — SYSTEM
 
 **Uptime and data-fetch health — useful for confirming the device is actually still updating.**
 
 ```
-SYSTEM 6/6                21:04:33
+SYSTEM 7/7                21:04:33
 UP  2d 03:14:22
 UPD  20:34:12 3h05m ago
 NEXT in 12m30s
