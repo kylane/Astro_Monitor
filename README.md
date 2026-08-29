@@ -124,7 +124,7 @@ The board's single WS2812 RGB LED mirrors the TONITE screen's verdict — green/
 
 ## Screens
 
-The device rotates through 6 screens on a 320×172 color display. Ratings and verdicts are color-coded consistently everywhere (green = perfect, lime = good, yellow = marginal, orange = doubtful, red = bad/raining), on top of the same text shown below (the mockups here are plain-text approximations of the actual color layout).
+The device rotates through 7 screens on a 320×172 color display. Ratings and verdicts are color-coded consistently everywhere (green = perfect, lime = good, yellow = marginal, orange = doubtful, red = bad/raining), on top of the same text shown below (the mockups here are plain-text approximations of the actual color layout).
 
 ---
 
@@ -133,7 +133,7 @@ The device rotates through 6 screens on a 320×172 color display. Ratings and ve
 **Overall go/no-go assessment for tonight's dark hours.**
 
 ```
-TONITE 1/5                 21:04:33
+TONITE 1/7                 21:04:33
  72%  Brisbane (BORTLE 5)
  ┌──┐ GOOD                    ← colored by score
  │▓▓│ Clear early, dips around 23:00
@@ -182,6 +182,8 @@ Your **Bortle scale rating is shown for context but deliberately isn't part of t
 
 **BEST WINDOW** shows the highest-scoring 3-hour slot inside tonight's real dark-hours window, with its score and cloud description.
 
+**Moon disc** — a small phase drawing in the top-right corner, a quick "how much moonlight is there tonight" cue. Full detail (phase name, illuminated %, moonrise/moonset) is on the **MOON** screen.
+
 **Dark-hours window** is computed from your saved lat/lon using the standard sunrise/sunset equation (civil twilight, i.e. sun ~0.83° below the horizon) — not a fixed 20:00–05:00 guess — so it tracks the actual season (e.g. much earlier sunsets in winter). If you're checking the device between midnight and dawn, "tonight" still correctly means the window that opened at *yesterday's* sunset, not tonight's upcoming one.
 
 ---
@@ -191,7 +193,7 @@ Your **Bortle scale rating is shown for context but deliberately isn't part of t
 **Bar chart of cloud cover for the next 18 hours (6 × 3-hour slots).**
 
 ```
-CLOUDS 2/5                 21:04:33
+CLOUDS 2/7                 21:04:33
  ┌──┐┌──┐┌──┐┌──┐┌──┐┌──┐ │OVC
  │  ││▓▓││▓▓││▓▓││  ││  │ │
  │▓▓││▓▓││▓▓││▓▓││  ││  │ │
@@ -220,7 +222,7 @@ Cloud cover scale:
 **Atmospheric seeing and transparency — how steady and clear the air is.**
 
 ```
-SEE RATING 3/5              21:04:33
+SEE RATING 3/7              21:04:33
 SEE           6  /8  GOOD
 TRANSPCY      5  /8  ABOVE AVG
 STABILITY: +6              STABLE
@@ -256,7 +258,7 @@ TREND: 6  6  5  4  4
 **Current surface conditions relevant to observing.**
 
 ```
-CONDTNS 4/5               21:04:33
+CONDTNS 4/7               21:04:33
 DUSK 17:45   DAWN 05:45
 TEMP  12°C (8-12° tonight)
 WIND  NE 7km/h
@@ -277,7 +279,7 @@ PREC  NONE
 **3-slot compact forecast table showing the next 9 hours.**
 
 ```
-FORECAST 5/5              21:04:33
+FORECAST 5/7              21:04:33
 ─────────────────────────────────
 TIME  CLD  SEE  TRN  GO?
 21:00   5    6    4   OK
@@ -303,12 +305,34 @@ Columns:
 
 ---
 
-### Screen 6 — SYSTEM
+### Screen 6 — MOON
+
+**Moon phase, illumination, and the next moonrise / moonset.**
+
+```
+MOON 6/7                  21:04:33
+ ╭──╮   Waxing Gibbous
+ │▓▓│   71% lit              ← colored: darker sky = better
+ │▓▓│   9.4 days old
+ ╰──╯   RISE 15:22  SET 01:47
+```
+
+- **Phase disc** — a scale drawing of the Moon's lit fraction, with the terminator placed for the current phase. Oriented for your hemisphere: below the equator (saved latitude negative) the lit limb is mirrored, matching what you actually see overhead.
+- **Phase name** — New / Waxing Crescent / First Quarter / Waxing Gibbous / Full / Waning Gibbous / Last Quarter / Waning Crescent. The four "exact" phases are only named within ~0.6 days of the real event; the rest of the time it reads as a crescent or gibbous.
+- **NN% lit** — illuminated fraction, colored on the usual green→red scale but *inverted*: a dark (new) Moon is green because it's the best backdrop for deep-sky, a full Moon is red.
+- **N.N days old** — days since the last new moon (synodic month ≈ 29.5 days).
+- **RISE / SET** — the *next* moonrise and *next* moonset from the current time, so in the evening you get tonight's rise and the following morning's set. Shows `--:--` for whichever doesn't occur in the next 25 hours — near new/full the Moon skips a rise or a set on roughly one day a month.
+
+All of this is computed on-device from the clock and your saved lat/lon (Montenbruck & Pfleger's low-precision lunar model) — no API we call carries moon data, and none is needed. Because it doesn't touch the 7timer fetch, this screen stays live even while data fetches are failing. Phase and illumination are accurate to a fraction of a percent; rise/set to a minute or two.
+
+---
+
+### Screen 7 — SYSTEM
 
 **Uptime and data-fetch health — useful for confirming the device is actually still updating.**
 
 ```
-SYSTEM 6/6                21:04:33
+SYSTEM 7/7                21:04:33
 UP  2d 03:14:22
 UPD  20:34:12 3h05m ago
 NEXT in 12m30s

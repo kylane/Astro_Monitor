@@ -5,7 +5,7 @@
 // mirrors the TONITE screen's verdict color.
 //
 // Uses 7timer.info "astro" product (no API key needed, HTTP only)
-// Rotates through 6 screens showing astronomy-relevant conditions.
+// Rotates through 7 screens showing astronomy-relevant conditions.
 //
 // Libraries (install from Arduino Library Manager):
 //   - GFX Library for Arduino ("Arduino_GFX") by moononournation
@@ -117,6 +117,7 @@ Adafruit_NeoPixel rgbLed(1, PIN_RGB_LED, NEO_RGB + NEO_KHZ800);  // this LED is 
 #define COL_OK      RGB565_YELLOW
 #define COL_WARN    RGB565_ORANGE
 #define COL_BAD     RGB565_RED
+#define COL_MOONDARK 0x4208               // unlit portion of the moon-phase disc (dark grey)
 
 // ---------------------------------------------------------------------------
 // Data structures
@@ -145,6 +146,15 @@ struct AstroSlot {
 // prototype fails to compile.
 struct NightWindow { time_t start; time_t end; };
 struct NightSegment { bool clear; time_t start; };
+// Moon phase/illumination for a given instant (see computeMoon()). Declared
+// up here for the same reason as the two structs above — it's a function
+// return type, and the IDE hoists prototypes above anything defined later.
+struct MoonData {
+  double age;         // days since the last new moon, 0..29.53
+  double illum;       // illuminated fraction, 0..1
+  bool   waxing;      // true while the lit fraction is still growing
+  const char* phase;  // phase name, e.g. "Waxing Gibbous"
+};
 
 const uint8_t MAX_SLOTS = 16;   // up to 48 hours ahead
 AstroSlot slots[MAX_SLOTS];
@@ -157,7 +167,7 @@ time_t    lastFetchEpoch = 0;   // wall-clock time of the last *successful* fetc
 char      initTime[12] = "";    // e.g. "2026062918"
 
 // Screen rotation
-const uint8_t NUM_SCREENS = 6;
+const uint8_t NUM_SCREENS = 7;
 uint8_t screen = 0;
 uint32_t lastScreenChange = 0;
 
@@ -581,6 +591,153 @@ int bestNightSlot() {
 }
 
 // ---------------------------------------------------------------------------
+// Moon — phase, illumination and next rise/set, all computed on-device from
+// the clock + location. No API we call carries moon data, but (like the
+// sunrise/sunset math above) it doesn't need one. Phase and illumination
+// come from the Moon's age since a known new moon. Rise/set use Montenbruck
+// & Pfleger's low-precision lunar position ("MiniMoon", ~1 arcmin), sampled
+// hour by hour with the horizon crossings found by linear interpolation —
+// accurate to a minute or two, which is all a glanceable display needs.
+// ---------------------------------------------------------------------------
+
+static double moonFrac(double x) { return x - floor(x); }
+
+// Greenwich mean sidereal time (radians) for a UT Modified Julian Date.
+static double gmstRad(double mjd) {
+  double mjd0 = floor(mjd);
+  double ut   = (mjd - mjd0) * 86400.0;              // seconds since 0h UT
+  double t0   = (mjd0 - 51544.5) / 36525.0;
+  double t    = (mjd  - 51544.5) / 36525.0;
+  double g    = 24110.54841 + 8640184.812866 * t0 + 1.0027379093 * ut
+              + (0.093104 - 6.2e-6 * t) * t * t;
+  g = fmod(g, 86400.0);
+  if (g < 0) g += 86400.0;
+  return g * (TWO_PI / 86400.0);
+}
+
+// Moon apparent RA (hours) and Dec (degrees) for Julian centuries T since
+// J2000 — Montenbruck & Pfleger "MiniMoon", largest periodic terms only.
+static void miniMoon(double T, double& raHours, double& decDeg) {
+  const double ARC    = 206264.806;   // arcsec per radian
+  const double COSEPS = 0.91748;      // cos / sin of the J2000 mean obliquity
+  const double SINEPS = 0.39778;
+
+  double l0 = moonFrac(0.606433 + 1336.855225 * T);          // mean long. (rev)
+  double l  = TWO_PI * moonFrac(0.374897 + 1325.552410 * T); // Moon mean anomaly
+  double ls = TWO_PI * moonFrac(0.993133 +   99.997361 * T); // Sun mean anomaly
+  double d  = TWO_PI * moonFrac(0.827361 + 1236.853086 * T); // elongation
+  double f  = TWO_PI * moonFrac(0.259086 + 1342.227825 * T); // arg. of latitude
+
+  double dLam = 22640.0 * sin(l)
+              - 4586.0  * sin(l - 2.0 * d)
+              + 2370.0  * sin(2.0 * d)
+              + 769.0   * sin(2.0 * l)
+              - 668.0   * sin(ls)
+              - 412.0   * sin(2.0 * f)
+              - 212.0   * sin(2.0 * l - 2.0 * d)
+              - 206.0   * sin(l + ls - 2.0 * d)
+              + 192.0   * sin(l + 2.0 * d)
+              - 165.0   * sin(ls - 2.0 * d)
+              + 148.0   * sin(l - ls)
+              - 125.0   * sin(d)
+              - 110.0   * sin(l + ls)
+              - 55.0    * sin(2.0 * f - 2.0 * d);
+
+  double s = f + (dLam + 412.0 * sin(2.0 * f) + 541.0 * sin(ls)) / ARC;
+  double h = f - 2.0 * d;
+  double n = -526.0 * sin(h)
+           + 44.0 * sin(l + h)
+           - 31.0 * sin(-l + h)
+           - 23.0 * sin(ls + h)
+           + 11.0 * sin(-ls + h)
+           - 25.0 * sin(-2.0 * l + f)
+           + 21.0 * sin(-l + f);
+
+  double lambda = TWO_PI * moonFrac(l0 + dLam / 1296000.0);  // ecliptic long (rad)
+  double beta   = (18520.0 * sin(s) + n) / ARC;              // ecliptic lat  (rad)
+
+  double cb  = cos(beta);
+  double x   = cb * cos(lambda);
+  double vy  = cb * sin(lambda);
+  double w   = sin(beta);
+  double y   = COSEPS * vy - SINEPS * w;
+  double z   = SINEPS * vy + COSEPS * w;
+  double rho = sqrt(1.0 - z * z);
+
+  decDeg  = RAD_TO_DEG * atan2(z, rho);
+  raHours = (24.0 / PI) * atan2(y, x + rho);   // 2*atan2, folded to 0..24 h
+  if (raHours < 0.0) raHours += 24.0;
+}
+
+// sin(Moon altitude) minus its value at the horizon (mean parallax minus
+// refraction and semidiameter, about +8'). A sign change between two hourly
+// samples brackets a rise (- to +) or a set (+ to -).
+static double moonAltMinusHorizon(time_t utc, double latRad, double lonRad) {
+  double mjd = (double)utc / 86400.0 + 40587.0;   // Unix epoch = MJD 40587
+  double T   = (mjd - 51544.5) / 36525.0;
+  double ra, dec;
+  miniMoon(T, ra, dec);
+  double tau  = gmstRad(mjd) + lonRad - ra * (PI / 12.0);   // local hour angle
+  double decR = dec * DEG_TO_RAD;
+  double alt  = sin(latRad) * sin(decR) + cos(latRad) * cos(decR) * cos(tau);
+  return alt - 0.00233;   // sin(+0.1333 deg)
+}
+
+// Next moonrise and next moonset (UTC epochs) at/after fromEpoch, by scanning
+// 25 hours ahead one hour at a time. Either can come back 0: at mid-latitudes
+// the Moon skips a rise or a set roughly one day a month (it drifts ~50 min
+// later each day), and for longer near the poles.
+void nextMoonRiseSet(float lat, float lon, time_t fromEpoch, time_t& riseOut, time_t& setOut) {
+  double latRad = lat * DEG_TO_RAD;
+  double lonRad = lon * DEG_TO_RAD;
+  riseOut = 0;
+  setOut  = 0;
+  double prev = moonAltMinusHorizon(fromEpoch, latRad, lonRad);
+  for (int hr = 1; hr <= 25; hr++) {
+    time_t t   = fromEpoch + (time_t)hr * 3600L;
+    double cur = moonAltMinusHorizon(t, latRad, lonRad);
+    if (prev < 0.0 && cur >= 0.0 && riseOut == 0) {
+      double fr = prev / (prev - cur);
+      riseOut = fromEpoch + (time_t)((hr - 1 + fr) * 3600.0);
+    }
+    if (prev >= 0.0 && cur < 0.0 && setOut == 0) {
+      double fr = prev / (prev - cur);
+      setOut = fromEpoch + (time_t)((hr - 1 + fr) * 3600.0);
+    }
+    if (riseOut != 0 && setOut != 0) break;
+    prev = cur;
+  }
+}
+
+// Moon age, illuminated fraction and phase name, from the time since a
+// reference new moon (2000-01-06 18:14 UTC); one synodic month is 29.530589
+// days. Illuminated fraction is the standard (1 - cos(phase angle)) / 2.
+MoonData computeMoon(time_t utc) {
+  const double SYNODIC = 29.530588853;
+  const time_t REF_NEW = 947182440L;   // 2000-01-06 18:14:00 UTC
+
+  double age = fmod((double)(utc - REF_NEW) / 86400.0, SYNODIC);
+  if (age < 0) age += SYNODIC;
+
+  MoonData m;
+  m.age    = age;
+  m.illum  = (1.0 - cos(TWO_PI * age / SYNODIC)) / 2.0;
+  m.waxing = age < SYNODIC / 2.0;
+
+  double p = age / SYNODIC;                 // 0..1 through the cycle
+  const double E = 0.02;                    // +/- ~0.6 day around each exact phase
+  if      (p < E || p >= 1.0 - E) m.phase = "New Moon";
+  else if (p < 0.25 - E)          m.phase = "Waxing Crescent";
+  else if (p < 0.25 + E)          m.phase = "First Quarter";
+  else if (p < 0.50 - E)          m.phase = "Waxing Gibbous";
+  else if (p < 0.50 + E)          m.phase = "Full Moon";
+  else if (p < 0.75 - E)          m.phase = "Waning Gibbous";
+  else if (p < 0.75 + E)          m.phase = "Last Quarter";
+  else                            m.phase = "Waning Crescent";
+  return m;
+}
+
+// ---------------------------------------------------------------------------
 // Fetch from 7timer — with retry for malformed JSON
 // ---------------------------------------------------------------------------
 bool fetchAstro() {
@@ -843,6 +1000,17 @@ void screenTonite() {
   char loc[48];
   snprintf(loc, sizeof(loc), "%s (BORTLE %u)", locationName, homeBortle);
   drawText(70, 62, COL_DIM, loc);  // TONITE: resolved place name + Bortle rating, level with gauge top
+
+  // Small moon-phase disc, top-right corner — a glanceable "how bright is the
+  // sky tonight" cue. Full phase/illumination/rise-set detail is on the MOON
+  // screen. Only needs the clock, so it's drawn before the dataValid gate.
+  time_t moonNow = time(nullptr);
+  if (moonNow > 1000000000L) {
+    MoonData md = computeMoon(moonNow);
+    // waxing != (homeLat < 0): mirror the lit limb for southern-hemisphere
+    // observers, who see the Moon flipped relative to the usual diagram.
+    drawMoonDisc(288, 83, 15, md.illum, md.waxing != (homeLat < 0));  // TONITE: moon-phase disc
+  }
 
   if (!dataValid) {
     drawNoDataMessage();
@@ -1113,7 +1281,79 @@ void screenForecast() {
 }
 
 // ---------------------------------------------------------------------------
-// Screen 6: SYSTEM — uptime + data-fetch diagnostics
+// Screen 6: MOON — phase, illuminated %, and the next moonrise/moonset.
+// All computed on-device from the clock + location (see computeMoon() /
+// nextMoonRiseSet()), so this screen stays useful even while the 7timer
+// fetch is failing — it only needs NTP time to be valid.
+// ---------------------------------------------------------------------------
+
+// Filled disc with the illuminated fraction lit. The terminator sits at the
+// disc half-width scaled by (1 - 2*illum): 0 at the quarters, +/-1 at new/
+// full. Lit side is the right for a waxing Moon, the left for a waning one.
+void drawMoonDisc(int cx, int cy, int r, double illum, bool waxing) {
+  canvas->fillCircle(cx, cy, r, COL_MOONDARK);
+  for (int dy = -r; dy <= r; dy++) {
+    double xw = sqrt((double)(r * r - dy * dy));
+    if (xw < 1.0) continue;
+    int xlo, xhi;
+    if (waxing) {
+      xlo = (int)ceil((1.0 - 2.0 * illum) * xw);
+      xhi = (int)xw;
+    } else {
+      xlo = -(int)xw;
+      xhi = (int)floor((2.0 * illum - 1.0) * xw);
+    }
+    if (xhi >= xlo)
+      canvas->drawFastHLine(cx + xlo, cy + dy, xhi - xlo + 1, COL_TEXT);
+  }
+  canvas->drawCircle(cx, cy, r, COL_DIM);
+}
+
+void screenMoon() {
+  drawHeader("MOON");
+
+  time_t now = time(nullptr);
+  if (now < 1000000000L) {          // NTP not synced yet — nothing to compute from
+    canvas->setFont(FONT_MD);
+    drawCentered(DISP_W / 2, 100, COL_DIM, "Waiting for clock");
+    return;
+  }
+
+  MoonData m = computeMoon(now);
+
+  // Phase disc down the left side — lit limb mirrored below the equator, where
+  // the Moon appears flipped relative to the conventional (northern) diagram.
+  drawMoonDisc(58, 104, 40, m.illum, m.waxing != (homeLat < 0));   // MOON: phase disc
+
+  // Phase name
+  canvas->setFont(FONT_MD);
+  drawText(116, 58, COL_TEXT, m.phase);                     // MOON: phase name
+
+  // Illuminated fraction — big, and colored by how sky-friendly it is
+  // (darker sky = better), matching the traffic-light scheme used elsewhere.
+  char l[32];
+  snprintf(l, sizeof(l), "%.0f%% lit", m.illum * 100.0);
+  canvas->setFont(FONT_LG);
+  drawText(116, 92, scoreColor(100 - (int)(m.illum * 100.0)), l);  // MOON: illuminated %
+
+  // Age in days since the new moon
+  canvas->setFont(FONT_MD);
+  snprintf(l, sizeof(l), "%.1f days old", m.age);
+  drawText(116, 114, COL_DIM, l);                           // MOON: moon age
+
+  // Next moonrise / moonset from now
+  time_t moonrise, moonset;
+  nextMoonRiseSet(homeLat, homeLon, now, moonrise, moonset);
+  char rStr[8] = "--:--", sStr[8] = "--:--";
+  struct tm lt;
+  if (moonrise) { localtime_r(&moonrise, &lt); snprintf(rStr, sizeof(rStr), "%02d:%02d", lt.tm_hour, lt.tm_min); }
+  if (moonset)  { localtime_r(&moonset,  &lt); snprintf(sStr, sizeof(sStr), "%02d:%02d", lt.tm_hour, lt.tm_min); }
+  snprintf(l, sizeof(l), "RISE %s   SET %s", rStr, sStr);
+  drawText(116, 148, COL_TEXT, l);                          // MOON: next rise / set
+}
+
+// ---------------------------------------------------------------------------
+// Screen 7: SYSTEM — uptime + data-fetch diagnostics
 // ---------------------------------------------------------------------------
 void screenSystem() {
   drawHeader("SYSTEM");
@@ -1529,7 +1769,8 @@ void loop() {
     case 2: screenSeeing();     break;  // Seeing + transparency
     case 3: screenConditions(); break;  // Wind, humidity, temp, precip
     case 4: screenForecast();   break;  // 24h table
-    case 5: screenSystem();    break;   // Uptime + fetch diagnostics
+    case 5: screenMoon();       break;  // Moon phase, illumination + rise/set
+    case 6: screenSystem();     break;  // Uptime + fetch diagnostics
   }
   canvas->flush();
 
