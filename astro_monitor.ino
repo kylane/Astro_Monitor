@@ -19,8 +19,10 @@
 // WiFi / location setup:
 //   On first boot (or if WiFi can't connect), the device opens a setup
 //   portal AP called "AstroMonitor-Setup". Connect to it and a captive
-//   portal page lets you pick your WiFi network and enter latitude,
-//   longitude and POSIX timezone.
+//   portal page lets you pick your WiFi network and enter your POSIX
+//   timezone. Latitude/longitude can be left blank, in which case the
+//   device works them out from its public IP address (see
+//   fetchLocationByIp()), or typed in to override that.
 //   To reopen the portal later (e.g. to change location or WiFi), press
 //   the board's FLASH button (GPIO0) at any time while it's running —
 //   release quickly to just open the portal, or hold 5+ seconds for a
@@ -114,6 +116,13 @@ float homeLon = HOME_LON;
 char  tzString[64];
 char  locationName[40] = "Location Unknown";
 uint32_t screenDwellMs = SCREEN_DWELL_MS;
+// Where lat/lon come from. Auto (the default) means they're looked up from the
+// device's public IP address; manual means the user typed them into the setup
+// portal and they're never touched. locationDetected is true once homeLat/
+// homeLon hold a successful lookup result (cached in settings.json).
+bool locationAuto = true;
+bool locationDetected = false;
+uint32_t lastLocAttempt = 0;   // millis() of the last IP lookup try (see loop())
 
 void loadSettings() {
   strncpy(tzString, TIMEZONE, sizeof(tzString) - 1);
@@ -142,17 +151,24 @@ void loadSettings() {
   strncpy(locationName, doc["loc"] | "Location Unknown", sizeof(locationName) - 1);
   locationName[sizeof(locationName) - 1] = '\0';
   screenDwellMs = doc["dwell"] | SCREEN_DWELL_MS;
-  Serial.printf("[CFG] Loaded lat=%.5f lon=%.5f tz=%s loc=%s dwell=%lums\n",
-                homeLat, homeLon, tzString, locationName, screenDwellMs);
+  // Firmware from before auto-detect existed never wrote these keys, and the
+  // lat/lon it saved were typed in by hand — so a missing key means manual.
+  locationAuto = doc["auto"] | false;
+  locationDetected = doc["det"] | false;
+  Serial.printf("[CFG] Loaded lat=%.5f lon=%.5f (%s) tz=%s loc=%s dwell=%lums\n",
+                homeLat, homeLon, locationAuto ? "auto" : "manual", tzString, locationName, screenDwellMs);
 }
 
-void saveSettings(float lat, float lon, const char* tz, const char* loc, uint32_t dwellMs) {
+void saveSettings(float lat, float lon, const char* tz, const char* loc, uint32_t dwellMs,
+                  bool autoLoc, bool detected) {
   JsonDocument doc;
   doc["lat"]   = lat;
   doc["lon"]   = lon;
   doc["tz"]    = tz;
   doc["loc"]   = loc;
   doc["dwell"] = dwellMs;
+  doc["auto"]  = autoLoc;
+  doc["det"]   = detected;
 
   File f = LittleFS.open("/settings.json", "w");
   if (!f) {
@@ -770,6 +786,129 @@ bool fetchLocationName(float lat, float lon) {
 }
 
 // ---------------------------------------------------------------------------
+// Estimate lat/lon from this device's public IP address — what the setup
+// portal's blank latitude/longitude fields mean. No API key needed. ip-api.com
+// goes first (plain HTTP, its free tier has no HTTPS, and in testing it landed
+// much closer than ipwho.is, which tends to return the nearest city centre);
+// ipwho.is (HTTPS) is the fallback. IP geolocation is only town/city accurate
+// and can be well off on mobile data, CGNAT or a VPN — fine for forecasts
+// (7timer rounds to 0.1 degree anyway) and rise/set times, and the resolved
+// place name on TONITE makes a bad guess easy to spot.
+// ---------------------------------------------------------------------------
+static bool coordsPlausible(float lat, float lon) {
+  // Comparisons are false for NaN, so those are rejected too. 0,0 is what a
+  // lookup service returns when it knows nothing, not a real position.
+  return lat >= -90.0f && lat <= 90.0f && lon >= -180.0f && lon <= 180.0f
+         && !(lat == 0.0f && lon == 0.0f);
+}
+
+static bool ipGeoParse(const String& payload, const char* latKey, const char* lonKey, float& lat, float& lon) {
+  if (payload.length() == 0) return false;
+  JsonDocument doc;
+  if (deserializeJson(doc, payload)) return false;
+  // A failed lookup comes back as {"status":"fail"} / {"success":false} with
+  // no coordinates at all, so the out-of-range default makes it fail the check.
+  float la = doc[latKey] | 999.0f;
+  float lo = doc[lonKey] | 999.0f;
+  if (!coordsPlausible(la, lo)) return false;
+  lat = la;
+  lon = lo;
+  return true;
+}
+
+bool fetchLocationByIp(float& lat, float& lon) {
+  String payload;
+
+  {
+    WiFiClient client;
+    client.setTimeout(8000);   // bound the socket — same reasoning as fetchLocationName()
+    HTTPClient http;
+    http.setTimeout(8000);
+    http.useHTTP10(true);
+    const char* url = "http://ip-api.com/json/?fields=status,lat,lon";
+    Serial.printf("[IPGEO] Fetching: %s\n", url);
+    http.begin(client, url);
+    int code = http.GET();
+    if (code == 200) payload = http.getString();
+    else Serial.printf("[IPGEO] ip-api.com HTTP %d\n", code);
+    http.end();
+    if (ipGeoParse(payload, "lat", "lon", lat, lon)) return true;
+  }
+
+  {
+    WiFiClientSecure client;
+    client.setInsecure();   // public lookup, nothing sensitive in it — skip certificate validation
+    client.setTimeout(8000);
+    HTTPClient http;
+    http.setTimeout(8000);
+    http.useHTTP10(true);
+    const char* url = "https://ipwho.is/?fields=success,latitude,longitude";
+    Serial.printf("[IPGEO] Fetching: %s\n", url);
+    http.begin(client, url);
+    int code = http.GET();
+    payload = "";
+    if (code == 200) payload = http.getString();
+    else Serial.printf("[IPGEO] ipwho.is HTTP %d\n", code);
+    http.end();
+    if (ipGeoParse(payload, "latitude", "longitude", lat, lon)) return true;
+  }
+
+  return false;
+}
+
+// Auto mode: look up lat/lon from the IP address and persist the result.
+// Called once at boot while nothing has been detected yet, then retried from
+// loop() until it works. Returns true if homeLat/homeLon were updated, so the
+// caller knows the forecast it already has is for the wrong place.
+bool resolveAutoLocation() {
+  float lat, lon;
+  Serial.println("[IPGEO] Looking up location from IP address...");
+  if (!fetchLocationByIp(lat, lon)) {
+    Serial.println("[IPGEO] Lookup failed");
+    return false;
+  }
+  Serial.printf("[IPGEO] Detected lat=%.4f lon=%.4f\n", lat, lon);
+  homeLat = lat;
+  homeLon = lon;
+  locationDetected = true;
+  // Old resolved name no longer applies until re-geocoded (see resolvePlaceName())
+  strncpy(locationName, "Location Unknown", sizeof(locationName) - 1);
+  locationName[sizeof(locationName) - 1] = '\0';
+  saveSettings(homeLat, homeLon, tzString, locationName, screenDwellMs, locationAuto, locationDetected);
+  return true;
+}
+
+// Resolves a human-readable place name once per location change (or once on
+// first boot if it's never been resolved) — cached in settings.json afterwards
+// so this isn't called on every boot.
+void resolvePlaceName() {
+  if (strcmp(locationName, "Location Unknown") != 0) return;
+  // Still on the config.h fallback coordinates — naming those (e.g. "Brisbane")
+  // would be actively misleading, so leave it as "Location Unknown".
+  if (locationAuto && !locationDetected) return;
+  Serial.println("[GEO] Resolving location name...");
+  if (fetchLocationName(homeLat, homeLon)) {
+    saveSettings(homeLat, homeLon, tzString, locationName, screenDwellMs, locationAuto, locationDetected);
+  } else {
+    Serial.println("[GEO] Lookup failed, using \"Location Unknown\"");
+  }
+}
+
+// Parses one latitude/longitude form field. Returns false for a blank field,
+// trailing junk, or a value outside [lo, hi] (NaN fails the range check too).
+static bool parseCoord(const char* s, float lo, float hi, float& out) {
+  if (!s) return false;
+  while (*s == ' ') s++;
+  if (!*s) return false;
+  char* end;
+  float v = strtof(s, &end);
+  while (*end == ' ') end++;
+  if (*end != '\0' || !(v >= lo && v <= hi)) return false;
+  out = v;
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 // Drawing helpers
 // ---------------------------------------------------------------------------
 
@@ -1249,17 +1388,37 @@ void screenSystem() {
 // ---------------------------------------------------------------------------
 bool runWifiSetup(bool forcePortal) {
   char latStr[16], lonStr[16], dwellStr[8];
-  snprintf(latStr, sizeof(latStr), "%.5f", homeLat);
-  snprintf(lonStr, sizeof(lonStr), "%.5f", homeLon);
+  char latAttr[48], lonAttr[48];   // must outlive wm — WiFiManager keeps the pointer, not a copy
+  if (locationAuto) {
+    // Auto mode leaves the fields blank, so submitting them blank means "keep
+    // auto-detecting"; the placeholder shows what was last detected.
+    latStr[0] = lonStr[0] = '\0';
+    if (locationDetected) {
+      snprintf(latAttr, sizeof(latAttr), "placeholder='Auto-detected: %.4f'", homeLat);
+      snprintf(lonAttr, sizeof(lonAttr), "placeholder='Auto-detected: %.4f'", homeLon);
+    } else {
+      snprintf(latAttr, sizeof(latAttr), "placeholder='Auto-detect'");
+      snprintf(lonAttr, sizeof(lonAttr), "placeholder='Auto-detect'");
+    }
+  } else {
+    // Manual override — show the saved values so they can be edited, or
+    // cleared to go back to auto.
+    snprintf(latStr, sizeof(latStr), "%.5f", homeLat);
+    snprintf(lonStr, sizeof(lonStr), "%.5f", homeLon);
+    snprintf(latAttr, sizeof(latAttr), "placeholder='Auto-detect'");
+    snprintf(lonAttr, sizeof(lonAttr), "placeholder='Auto-detect'");
+  }
   snprintf(dwellStr, sizeof(dwellStr), "%lu", (unsigned long)(screenDwellMs / 1000));
 
   WiFiManagerParameter html_latlon_link(
-    "<p style='margin:8px 0 2px'>Find your <b>latitude/longitude</b> at "
+    "<p style='margin:8px 0 2px'><b>Location</b> — leave latitude and longitude <b>blank</b> to "
+    "detect it automatically from your internet connection (accurate to roughly your town or city). "
+    "To override it, enter your own — find them at "
     "<a href='https://www.latlong.net' target='_blank'>latlong.net</a><br>"
     "<small>(this link may not load once you're connected to this WiFi — if so, "
     "look it up beforehand, write it down, and come back to enter it below)</small></p>");
-  WiFiManagerParameter custom_lat("lat", "Latitude", latStr, sizeof(latStr) - 1);
-  WiFiManagerParameter custom_lon("lon", "Longitude", lonStr, sizeof(lonStr) - 1);
+  WiFiManagerParameter custom_lat("lat", "Latitude", latStr, sizeof(latStr) - 1, latAttr);
+  WiFiManagerParameter custom_lon("lon", "Longitude", lonStr, sizeof(lonStr) - 1, lonAttr);
   WiFiManagerParameter html_tz_link(
     "<p style='margin:8px 0 2px'>Find your <b>POSIX timezone string</b> in "
     "<a href='https://github.com/nayarsystems/posix_tz_db/blob/master/zones.csv' target='_blank'>this list</a><br>"
@@ -1318,8 +1477,22 @@ bool runWifiSetup(bool forcePortal) {
   }
 
   if (settingsSaved && connected) {
-    homeLat = atof(custom_lat.getValue());
-    homeLon = atof(custom_lon.getValue());
+    // Both fields valid -> manual override, used exactly as typed. Anything
+    // else (blank, only one filled, a typo) -> auto-detect, re-run on the next
+    // boot; until it succeeds the previous coordinates stay in use.
+    float newLat, newLon;
+    if (parseCoord(custom_lat.getValue(), -90.0f, 90.0f, newLat) &&
+        parseCoord(custom_lon.getValue(), -180.0f, 180.0f, newLon)) {
+      homeLat = newLat;
+      homeLon = newLon;
+      locationAuto = false;
+    } else {
+      locationAuto = true;
+      if (custom_lat.getValue()[0] || custom_lon.getValue()[0]) {
+        Serial.println("[CFG] Latitude/longitude not valid — falling back to auto-detect");
+      }
+    }
+    locationDetected = false;
     strncpy(tzString, custom_tz.getValue(), sizeof(tzString) - 1);
     tzString[sizeof(tzString) - 1] = '\0';
 
@@ -1331,7 +1504,7 @@ bool runWifiSetup(bool forcePortal) {
     // Location changed — old resolved name no longer applies until re-geocoded
     strncpy(locationName, "Location Unknown", sizeof(locationName) - 1);
     locationName[sizeof(locationName) - 1] = '\0';
-    saveSettings(homeLat, homeLon, tzString, locationName, screenDwellMs);
+    saveSettings(homeLat, homeLon, tzString, locationName, screenDwellMs, locationAuto, locationDetected);
 
     u8g2.clearBuffer();
     u8g2.setFont(u8g2_font_6x12_tr);
@@ -1410,6 +1583,20 @@ void setup() {
   }
   Serial.println(" done");
 
+  // Auto-detect mode: work out where we are before the first forecast fetch,
+  // since the fetch URL is built from lat/lon. Skipped once a lookup has
+  // succeeded (it's cached in settings.json); saving the setup portal with
+  // blank latitude/longitude clears that and looks again. If it fails, loop()
+  // keeps retrying and the config.h fallback coordinates cover the gap.
+  if (locationAuto && !locationDetected) {
+    u8g2.clearBuffer();
+    u8g2.drawStr(4, 20, "ASTRO MONITOR");
+    u8g2.drawStr(4, 36, "Finding location...");
+    u8g2.sendBuffer();
+    resolveAutoLocation();
+    lastLocAttempt = millis();
+  }
+
   u8g2.clearBuffer();
   u8g2.drawStr(4, 20, "ASTRO MONITOR");
   u8g2.drawStr(4, 36, "Fetching data...");
@@ -1422,17 +1609,7 @@ void setup() {
   doFetchAstro();
   lastScreenChange = millis();
 
-  // Resolve a human-readable place name once per location change (or once
-  // on first boot if it's never been resolved) — cached in settings.json
-  // afterwards so this isn't called on every boot.
-  if (strcmp(locationName, "Location Unknown") == 0) {
-    Serial.println("[GEO] Resolving location name...");
-    if (fetchLocationName(homeLat, homeLon)) {
-      saveSettings(homeLat, homeLon, tzString, locationName, screenDwellMs);
-    } else {
-      Serial.println("[GEO] Lookup failed, using \"Location Unknown\"");
-    }
-  }
+  resolvePlaceName();
 }
 
 // ---------------------------------------------------------------------------
@@ -1485,6 +1662,17 @@ void loop() {
   if (millis() - lastScreenChange >= screenDwellMs) {
     screen = (screen + 1) % NUM_SCREENS;
     lastScreenChange = millis();
+  }
+
+  // Auto-detect retry: if the boot-time IP lookup failed, keep trying in the
+  // background. The forecast fetched meanwhile was for the fallback
+  // coordinates, so refetch it as soon as we know where we really are.
+  if (locationAuto && !locationDetected && millis() - lastLocAttempt >= LOCATION_RETRY_MS) {
+    lastLocAttempt = millis();
+    if (resolveAutoLocation()) {
+      doFetchAstro();
+      resolvePlaceName();
+    }
   }
 
   // Periodic data refresh. While we don't have valid data yet, retry every
