@@ -13,6 +13,7 @@ This is the **Mk2** build (color LCD). The **Mk1** build (monochrome OLED, ESP82
 | Component | Details | Shop |
 |-----------|---------|------|
 | Dev board | Waveshare ESP32-C6-LCD-1.47 (ESP32-C6FH4, 4MB flash, onboard 1.47" 172×320 ST7789 LCD, non-touch) | https://www.waveshare.com/esp32-c6-lcd-1.47.htm |
+| 3D printed case | Print file: [`case/Mk2_Case.3mf`](case/Mk2_Case.3mf) | — |
 
 This is an all-in-one dev board — the LCD, its SPI wiring, the onboard RGB LED, and the BOOT/RESET buttons are already built onto the PCB, so there's nothing to wire up separately. The pin table below is just for reference (e.g. if you ever need to confirm a connection or adapt the sketch to a different ST7789 board).
 
