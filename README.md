@@ -2,6 +2,8 @@
 
 A standalone ESP32-C6 device that fetches real-time astronomy weather forecasts and displays them on a 1.47" color LCD. At a glance it tells you whether tonight is worth setting up your telescope.
 
+This is the **Mk2** build (color LCD). The **Mk1** build (monochrome OLED, ESP8266) lives on the `main` branch.
+
 ![Astro Monitor](images/IMG1.jpg)
 
 ---
@@ -70,13 +72,13 @@ Install all from **Sketch → Include Library → Manage Libraries**:
 `config.h` only holds fallback defaults now (location, timezone, Bortle rating, display timing) — WiFi credentials aren't stored in code at all. You can leave it as-is and set everything up from the device itself; see **WiFi & Location Setup** below. Display pins, rotation, colors, fonts, and the status LED are fixed in `astro_monitor.ino` near the top (`PIN_LCD_*`, `PIN_RGB_LED`, `LCD_ROTATION`, `COL_*`, `FONT_*`) — only touch those if you're adapting the sketch to different hardware.
 
 ```cpp
-#define HOME_LAT       -27.65973   // your latitude
-#define HOME_LON       152.88028   // your longitude
+#define HOME_LAT       -27.65973   // fallback latitude — only used until the IP lookup succeeds
+#define HOME_LON       152.88028   // fallback longitude
 #define HOME_BORTLE    5           // your Bortle scale rating, 1 (darkest) - 9 (brightest)
 #define TIMEZONE       "AEST-10"   // your POSIX timezone string
 ```
 
-Find your coordinates at https://www.latlong.net
+You normally don't need to set a location at all: by default the device works it out from its IP address (see **WiFi & Location Setup**). `HOME_LAT`/`HOME_LON` are just stand-ins used until that lookup succeeds. If you'd rather pin an exact location, type it into the setup portal — find your coordinates at https://www.latlong.net
 
 Find your Bortle scale rating (light pollution, 1=darkest sky, 9=brightest/most light-polluted) at https://www.lightpollutionmap.net — click your location on the map. There's no free API for this (checked the obvious light-pollution map sites — all browser-only, no JSON endpoint), so unlike lat/lon and place-name, it's a one-time manual lookup rather than something the device resolves on its own.
 
@@ -91,7 +93,7 @@ https://github.com/nayarsystems/posix_tz_db/blob/master/zones.csv
 
 The device configures itself over WiFi — no code editing or re-flashing needed to change network, location, timezone, Bortle rating or screen rotation time.
 
-**First boot:** the screen will show "SETUP MODE". From your phone or laptop, join the WiFi network **`AstroMonitor-Setup`**, and a setup page (dark themed, via a full-page CSS invert) should open automatically (if not, browse to `192.168.4.1`). Pick your home WiFi network and enter its password, plus your latitude, longitude, POSIX timezone string, your Bortle scale rating (1–9, with a link to look it up), and how long each screen should stay up before rotating to the next one ("Screen rotation time", in seconds — defaults to 10), then save. The device reboots and connects.
+**First boot:** the screen will show "SETUP MODE". From your phone or laptop, join the WiFi network **`AstroMonitor-Setup`**, and a setup page (dark themed, via a full-page CSS invert) should open automatically (if not, browse to `192.168.4.1`). Pick your home WiFi network and enter its password, plus your POSIX timezone string, your Bortle scale rating (1–9, with a link to look it up), optionally your latitude and longitude (leave both blank and the device works out roughly where it is from its IP address — see below), and how long each screen should stay up before rotating to the next one ("Screen rotation time", in seconds — defaults to 10), then save. The device reboots and connects.
 
 If the WiFi password you entered doesn't work, the screen shows "WIFI FAILED / Could not connect to that network / Reopening setup..." and the portal automatically reopens after a few seconds so you can try again — you don't need to press the button again.
 
@@ -104,6 +106,8 @@ Note: this button only works when pressed *after* the device has already booted 
 
 Settings are stored on the device (LittleFS for location/timezone/Bortle rating, the ESP32's own WiFi flash storage for network credentials) and survive power loss and re-uploading the sketch — until a factory reset explicitly clears them.
 
+**Location — automatic by default, with a manual override.** Leave latitude and longitude blank and, right after connecting to WiFi, the device estimates where it is from its public IP address. That happens once and the result is saved; if the lookup fails the device keeps retrying every 5 minutes (using the `config.h` fallback coordinates in the meantime, with TONITE showing "Location Unknown") and refetches the forecast as soon as one succeeds. IP lookups are only town/city accurate, and can be well off on mobile data or hotspots, behind a VPN, or with some ISPs — that's fine for forecasts (7timer works at 0.1° resolution) and sunrise/sunset/moonrise times, and the place name on the TONITE screen shows you what it picked. To override it, double-click the BOOT button, type your latitude and longitude into the portal and save — typed coordinates are used exactly as entered and are never replaced by a lookup. Clear both fields (and save) to go back to automatic; that also re-runs the lookup, so do this after moving the device somewhere new. If only one field is filled in, or a value isn't a valid coordinate, it falls back to automatic. A location entered with earlier firmware stays manual after an update.
+
 After connecting, the device automatically looks up a human-readable place name for your coordinates (e.g. "Brisbane") and shows it, alongside your Bortle rating, on the TONITE screen for confirmation that both are right. If the place-name lookup fails (or hasn't run yet), it falls back to showing "Location Unknown" — this doesn't affect forecasts, which are driven entirely by lat/lon.
 
 ---
@@ -112,6 +116,7 @@ After connecting, the device automatically looks up a human-readable place name 
 
 - **7Timer!** (https://www.7timer.info) — free public astronomy weather service based on NOAA/NCEP GFS numerical weather models. No API key required. Data is fetched every ~30 minutes and covers the next 72 hours in 3-hour slots.
 - **BigDataCloud reverse geocoding** (https://www.bigdatacloud.net) — free, no API key required, used only to resolve your lat/lon into a place name for display. Called once when your location is first set or changed (the result is cached), not on a recurring schedule.
+- **ip-api.com** (http://ip-api.com) with **ipwho.is** (https://ipwho.is) as a fallback — free, no API key required, used only to estimate your lat/lon from your public IP address when you haven't entered coordinates yourself. Called once at first boot or after a setup-portal save with blank coordinates (and retried every 5 minutes if it fails), not on a recurring schedule. ip-api's free tier is HTTP-only and intended for non-commercial use.
 - **Bortle scale rating** — manually entered, not fetched from anywhere. See **Configuration** above for why (no free API exists for this).
 
 ---
