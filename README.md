@@ -14,7 +14,7 @@ This is the **Mk1** build (monochrome OLED). The **Mk2** build (color LCD, ESP32
 |-----------|---------|------|
 | Microcontroller | ESP8266 (FREENOVE ESP8266 / NodeMCU ESP-12E or similar) | https://www.amazon.com.au/dp/B0B6G3KXSK |
 | Display | 1.3" SH1106 I2C OLED, 128×64 pixels | https://www.amazon.com.au/dp/B0DX2NXK49 |
-| 3D Printed case | Just a recommendation | https://cults3d.com/en/3d-model/gadget/1-3-inch-oled-wemos-d1-mini-esp8266-display |
+| 3D printed case | Print file: [`case/Mk1_case.3mf`](case/Mk1_case.3mf). An alternative design is on Cults3D | https://cults3d.com/en/3d-model/gadget/1-3-inch-oled-wemos-d1-mini-esp8266-display |
 
 ### Wiring
 
